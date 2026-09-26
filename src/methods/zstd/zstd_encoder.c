@@ -2404,6 +2404,42 @@ gcomp_status_t zstd_encoder_reset(gcomp_encoder_t * encoder) {
 
   // Parallel mode reset
   if (state->parallel_ctx) {
+    // Outstanding jobs have to go before the context can be reset, and
+    // discarding them is exactly what a reset means: the stream they belong to
+    // is being abandoned.
+    //
+    // Without this, `gcomp_encoder_reset()` returned GCOMP_ERR_INVALID_ARG
+    // whenever any job was still with a worker - so a caller who had handed
+    // over more than one job's worth of input and then changed their mind could
+    // not reset at all, while the same call single-threaded succeeded. Two
+    // things were wrong with that. It contradicts the documented contract, that
+    // after a reset "the encoder behaves as if it was just created"; and
+    // INVALID_ARG was the wrong code for it, because the argument was fine and
+    // the state was busy. `gcomp_parallel_block_reset()` still refuses a
+    // context with work outstanding, which is right - it is this layer's job to
+    // make sure none is.
+    //
+    // The results are collected and freed rather than left for the sequencer,
+    // because a job holds a match finder and buffers from the pool.
+    status = zstd_parallel_wait(state->parallel_ctx);
+    if (status != GCOMP_OK) {
+      return gcomp_encoder_set_error(
+          encoder, status, "parallel wait failed during reset");
+    }
+    while (zstd_parallel_pending_count(state->parallel_ctx) > 0) {
+      zstd_parallel_job_t * completed = NULL;
+      status = zstd_parallel_get_result(state->parallel_ctx, &completed);
+      if (status != GCOMP_OK || !completed) {
+        return gcomp_encoder_set_error(encoder,
+            status != GCOMP_OK ? status : GCOMP_ERR_INTERNAL,
+            "could not drain a parallel job during reset");
+      }
+      zstd_parallel_free_job(state->parallel_ctx, completed);
+    }
+    // Anything those jobs had already staged belongs to the abandoned stream.
+    state->parallel_output_buf_pos = 0;
+    state->parallel_output_buf_len = 0;
+
     // Reset parallel context
     status = zstd_parallel_reset(state->parallel_ctx);
     if (status != GCOMP_OK) {

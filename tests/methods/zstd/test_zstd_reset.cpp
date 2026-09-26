@@ -27,8 +27,364 @@ protected:
   void SetUp() override {
     registry_ = gcomp_registry_default();
   }
+
+  /// Drive update() until the whole chunk is taken, collecting output.
+  void PushAll(gcomp_encoder_t * enc, const uint8_t * data, size_t len,
+      std::vector<uint8_t> & out) {
+    uint8_t win[8192];
+    gcomp_buffer_t in = {const_cast<uint8_t *>(data), len, 0};
+    while (in.used < in.size) {
+      gcomp_buffer_t ob = {win, sizeof(win), 0};
+      const size_t before = in.used;
+      ASSERT_EQ(gcomp_encoder_update(enc, &in, &ob), GCOMP_OK);
+      out.insert(out.end(), win, win + ob.used);
+      ASSERT_FALSE(in.used == before && ob.used == 0) << "no progress";
+    }
+  }
+
+  void FlushAll(gcomp_encoder_t * enc, gcomp_flush_t mode,
+      std::vector<uint8_t> & out) {
+    uint8_t win[8192];
+    for (;;) {
+      gcomp_buffer_t ob = {win, sizeof(win), 0};
+      const gcomp_status_t st = gcomp_encoder_flush(enc, &ob, mode);
+      out.insert(out.end(), win, win + ob.used);
+      if (st == GCOMP_OK) {
+        return;
+      }
+      ASSERT_EQ(st, GCOMP_ERR_LIMIT);
+    }
+  }
+
+  void FinishAll(gcomp_encoder_t * enc, std::vector<uint8_t> & out) {
+    uint8_t win[8192];
+    for (;;) {
+      gcomp_buffer_t ob = {win, sizeof(win), 0};
+      const gcomp_status_t st = gcomp_encoder_finish(enc, &ob);
+      out.insert(out.end(), win, win + ob.used);
+      if (st == GCOMP_OK) {
+        return;
+      }
+      ASSERT_EQ(st, GCOMP_ERR_LIMIT);
+    }
+  }
+
+  /// Decode a whole stream, allowing concatenated frames.
+  std::vector<uint8_t> Decode(
+      const std::vector<uint8_t> & stream, size_t expected) {
+    gcomp_options_t * dopts = nullptr;
+    EXPECT_EQ(gcomp_options_create(&dopts), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_bool(dopts, "zstd.concat", 1), GCOMP_OK);
+    gcomp_decoder_t * dec = nullptr;
+    EXPECT_EQ(
+        gcomp_decoder_create(registry_, "zstd", dopts, &dec), GCOMP_OK);
+    gcomp_options_destroy(dopts);
+    if (!dec) {
+      return {};
+    }
+    std::vector<uint8_t> out(expected + 65536);
+    gcomp_buffer_t in = {
+        const_cast<uint8_t *>(stream.data()), stream.size(), 0};
+    gcomp_buffer_t ob = {out.data(), out.size(), 0};
+    EXPECT_EQ(gcomp_decoder_update(dec, &in, &ob), GCOMP_OK);
+    EXPECT_EQ(gcomp_decoder_finish(dec, &ob), GCOMP_OK);
+    out.resize(ob.used);
+    gcomp_decoder_destroy(dec);
+    return out;
+  }
+
+  /// Decode a deliberately unfinished stream: update() only, never finish().
+  /// A SYNC flush leaves the frame open, so finish() would rightly call it
+  /// truncated - the flush promise is about what update() can already produce.
+  size_t DecodePrefixSize(
+      const std::vector<uint8_t> & stream, size_t expected) {
+    gcomp_options_t * dopts = nullptr;
+    EXPECT_EQ(gcomp_options_create(&dopts), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_bool(dopts, "zstd.concat", 1), GCOMP_OK);
+    gcomp_decoder_t * dec = nullptr;
+    EXPECT_EQ(gcomp_decoder_create(registry_, "zstd", dopts, &dec), GCOMP_OK);
+    gcomp_options_destroy(dopts);
+    if (!dec) {
+      return 0;
+    }
+    std::vector<uint8_t> out(expected + 65536);
+    gcomp_buffer_t in = {
+        const_cast<uint8_t *>(stream.data()), stream.size(), 0};
+    gcomp_buffer_t ob = {out.data(), out.size(), 0};
+    EXPECT_EQ(gcomp_decoder_update(dec, &in, &ob), GCOMP_OK);
+    const size_t got = ob.used;
+    gcomp_decoder_destroy(dec);
+    return got;
+  }
+
+  /// Compressible-but-not-trivial bytes, so a stale history is visible as a
+  /// wrong decode rather than absorbed by a stored block.
+  static std::vector<uint8_t> Prose(size_t n, unsigned seed) {
+    static const char * words[] = {"alpha ", "beta ", "gamma ", "delta ",
+        "epsilon ", "zeta ", "eta ", "theta "};
+    std::vector<uint8_t> v(n);
+    unsigned st = seed;
+    size_t pos = 0;
+    while (pos < n) {
+      st = st * 1103515245u + 12345u;
+      const char * w = words[(st >> 16) % 8];
+      size_t l = strlen(w);
+      if (pos + l > n) {
+        l = n - pos;
+      }
+      memcpy(v.data() + pos, w, l);
+      pos += l;
+    }
+    return v;
+  }
+
   gcomp_registry_t * registry_ = nullptr;
 };
+
+//
+// Parallel encoder reset
+//
+// Until 2026-09-26 the whole of this was one test, `ParallelEncodeReset` in
+// test_zstd_encoder.cpp: 21 bytes in, one update, one finish, threads=2. That
+// is how `a726438` hid - a reset that left the held job's overlap in place, so
+// the first block of the new stream matched into the previous one and decoded
+// to nothing. It was invisible until short blocks with history started being
+// compressed at all, because every input below MIN_COMPRESSION_SIZE used to be
+// stored raw.
+//
+// What each of these varies is the thing that test could not: enough data to
+// cross a job boundary, a reset while work is still in flight, a reset after a
+// flush has staged a new frame header, and the option that adds a second kind
+// of history (zstd.long). The previous stream is deliberately *similar* to the
+// next one in every case, because identical-looking data is what makes a stale
+// history compress well and decode wrong.
+//
+
+namespace {
+
+/**
+ * Destroys the encoder however the test leaves.
+ *
+ * Not tidiness. A gtest ASSERT returns from the test body, so a plain
+ * `gcomp_encoder_destroy()` at the end of the function is skipped on failure -
+ * and a leaked parallel encoder leaves its pool workers parked on a semaphore,
+ * which makes cutil's thread destructor block in pthread_join at process exit.
+ * The suite then hangs *after* printing its failures, and with stdout
+ * block-buffered to a file it looks like a hang with no output at all rather
+ * than a test that failed. Found exactly that way.
+ */
+class EncGuard {
+public:
+  explicit EncGuard(gcomp_encoder_t * e) : e_(e) {}
+  ~EncGuard() {
+    if (e_) {
+      gcomp_encoder_destroy(e_);
+    }
+  }
+  EncGuard(const EncGuard &) = delete;
+  EncGuard & operator=(const EncGuard &) = delete;
+
+private:
+  gcomp_encoder_t * e_;
+};
+
+/// Build a parallel encoder, optionally with long-distance matching.
+gcomp_encoder_t * MakeParallel(gcomp_registry_t * registry, uint64_t threads,
+    bool longmode, bool checksum) {
+  gcomp_options_t * o = nullptr;
+  if (gcomp_options_create(&o) != GCOMP_OK) {
+    return nullptr;
+  }
+  if (gcomp_options_set_uint64(o, "threads.count", threads) != GCOMP_OK) {
+    gcomp_options_destroy(o);
+    return nullptr;
+  }
+  if (longmode &&
+      gcomp_options_set_bool(o, "zstd.long", 1) != GCOMP_OK) {
+    gcomp_options_destroy(o);
+    return nullptr;
+  }
+  if (checksum &&
+      gcomp_options_set_bool(o, "zstd.checksum", 1) != GCOMP_OK) {
+    gcomp_options_destroy(o);
+    return nullptr;
+  }
+  gcomp_encoder_t * enc = nullptr;
+  const gcomp_status_t st = gcomp_encoder_create(registry, "zstd", o, &enc);
+  gcomp_options_destroy(o);
+  return (st == GCOMP_OK) ? enc : nullptr;
+}
+
+} // namespace
+
+/**
+ * Two full streams through one parallel encoder, each big enough to be several
+ * jobs, and the second stream's bytes chosen to look like the first's.
+ *
+ * The 21-byte test cannot reach this: one job, one block, and a payload short
+ * enough that a stale window has almost nothing to offer.
+ */
+TEST_F(ZstdResetTest, ParallelResetAcrossJobBoundaries) {
+  // Comfortably several default 512 KB jobs.
+  const std::vector<uint8_t> s1 = Prose(1200000, 11u);
+  const std::vector<uint8_t> s2 = Prose(1200000, 12u);
+
+  for (uint64_t threads : {(uint64_t)2, (uint64_t)4}) {
+    gcomp_encoder_t * enc = MakeParallel(registry_, threads, false, false);
+    EncGuard guard(enc);
+    ASSERT_NE(enc, nullptr) << "threads=" << threads;
+
+    std::vector<uint8_t> out1;
+    PushAll(enc, s1.data(), s1.size(), out1);
+    FinishAll(enc, out1);
+    EXPECT_EQ(Decode(out1, s1.size()), s1) << "threads=" << threads;
+
+    ASSERT_EQ(gcomp_encoder_reset(enc), GCOMP_OK) << "threads=" << threads;
+
+    std::vector<uint8_t> out2;
+    PushAll(enc, s2.data(), s2.size(), out2);
+    FinishAll(enc, out2);
+    EXPECT_EQ(Decode(out2, s2.size()), s2)
+        << "threads=" << threads
+        << ": the second stream did not decode to itself, which is what a "
+           "history carried across the reset looks like";
+
+  }
+}
+
+/**
+ * Reset part-way through a stream, with jobs submitted and results very likely
+ * still in flight. The abandoned stream's output is thrown away, which is what
+ * a caller doing this means; what must not survive is any of its state.
+ */
+TEST_F(ZstdResetTest, ParallelResetMidStreamAbandonsWorkInFlight) {
+  const std::vector<uint8_t> partial = Prose(900000, 21u);
+  const std::vector<uint8_t> whole = Prose(900000, 22u);
+
+  for (uint64_t threads : {(uint64_t)2, (uint64_t)4}) {
+    gcomp_encoder_t * enc = MakeParallel(registry_, threads, false, false);
+    EncGuard guard(enc);
+    ASSERT_NE(enc, nullptr) << "threads=" << threads;
+
+    // Hand over most of a stream and never finish it.
+    std::vector<uint8_t> discarded;
+    PushAll(enc, partial.data(), partial.size(), discarded);
+
+    ASSERT_EQ(gcomp_encoder_reset(enc), GCOMP_OK) << "threads=" << threads;
+
+    std::vector<uint8_t> out;
+    PushAll(enc, whole.data(), whole.size(), out);
+    FinishAll(enc, out);
+    EXPECT_EQ(Decode(out, whole.size()), whole)
+        << "threads=" << threads
+        << ": a stream begun after an abandoned one did not decode to itself";
+
+  }
+}
+
+/**
+ * Reset immediately after a full flush, which is the one case where the reset
+ * finds a frame header already staged in `parallel_output_buf` by the flush.
+ * Writing the new stream's header without clearing that would emit two.
+ */
+TEST_F(ZstdResetTest, ParallelResetAfterAFullFlush) {
+  const std::vector<uint8_t> s1 = Prose(700000, 31u);
+  const std::vector<uint8_t> s2 = Prose(700000, 32u);
+
+  for (gcomp_flush_t mode : {GCOMP_FLUSH_SYNC, GCOMP_FLUSH_FULL}) {
+    gcomp_encoder_t * enc = MakeParallel(registry_, 4, false, false);
+    EncGuard guard(enc);
+    ASSERT_NE(enc, nullptr);
+
+    std::vector<uint8_t> out1;
+    PushAll(enc, s1.data(), s1.size() / 2, out1);
+    FlushAll(enc, mode, out1);
+    // Everything consumed so far must already be readable - that is the flush
+    // contract, and it has to hold on the stream we are about to abandon.
+    // update() only: a SYNC flush leaves the frame open, so asking finish()
+    // about it reports GCOMP_ERR_CORRUPT correctly, which is what the first
+    // version of this test got wrong.
+    EXPECT_EQ(DecodePrefixSize(out1, s1.size() / 2), s1.size() / 2)
+        << "mode=" << (int)mode;
+
+    ASSERT_EQ(gcomp_encoder_reset(enc), GCOMP_OK) << "mode=" << (int)mode;
+
+    std::vector<uint8_t> out2;
+    PushAll(enc, s2.data(), s2.size(), out2);
+    FinishAll(enc, out2);
+    EXPECT_EQ(Decode(out2, s2.size()), s2)
+        << "mode=" << (int)mode
+        << ": the stream after a flush-then-reset did not decode to itself";
+
+  }
+}
+
+/**
+ * The same, with long-distance matching on, because `zstd.long` adds a second
+ * kind of history: the LDM table holds absolute positions and its scan keeps a
+ * cursor. Both are per-job state in a pool the reset clears through
+ * `zstd_parallel_reset()`, and a carried cursor is what section 8 of the notes
+ * records going wrong once already.
+ *
+ * The payload repeats a block far enough back that only a long match can reach
+ * it, so the option is doing something rather than merely being set.
+ */
+TEST_F(ZstdResetTest, ParallelResetWithLongDistanceMatching) {
+  // A shape a long match can find: a distinctive run, a megabyte of filler,
+  // then the run again.
+  auto build = [](unsigned seed) {
+    std::vector<uint8_t> run = Prose(80000, seed);
+    std::vector<uint8_t> filler = Prose(1400000, seed + 500u);
+    std::vector<uint8_t> v(run);
+    v.insert(v.end(), filler.begin(), filler.end());
+    v.insert(v.end(), run.begin(), run.end());
+    return v;
+  };
+  const std::vector<uint8_t> s1 = build(41u);
+  const std::vector<uint8_t> s2 = build(42u);
+
+  gcomp_encoder_t * enc = MakeParallel(registry_, 4, true, true);
+  EncGuard guard(enc);
+  ASSERT_NE(enc, nullptr) << "zstd.long with threads should be supported";
+
+  std::vector<uint8_t> out1;
+  PushAll(enc, s1.data(), s1.size(), out1);
+  FinishAll(enc, out1);
+  EXPECT_EQ(Decode(out1, s1.size()), s1);
+
+  ASSERT_EQ(gcomp_encoder_reset(enc), GCOMP_OK);
+
+  std::vector<uint8_t> out2;
+  PushAll(enc, s2.data(), s2.size(), out2);
+  FinishAll(enc, out2);
+  EXPECT_EQ(Decode(out2, s2.size()), s2)
+      << "the second long-mode stream did not decode to itself";
+
+  // And the checksum is per stream: a hash carried across the reset would make
+  // the second frame's trailer describe the first frame's content, which the
+  // decode above validates because zstd.checksum is on.
+}
+
+/**
+ * Many short streams through one parallel encoder. Each is below the job size,
+ * so every one exercises the held-job path that `a726438` fixed, and doing it
+ * repeatedly is what would expose state that accumulates rather than state
+ * that is merely stale.
+ */
+TEST_F(ZstdResetTest, ParallelManyResetsWithShortStreams) {
+  gcomp_encoder_t * enc = MakeParallel(registry_, 4, false, true);
+  EncGuard guard(enc);
+  ASSERT_NE(enc, nullptr);
+
+  for (unsigned i = 0; i < 12; i++) {
+    const std::vector<uint8_t> data = Prose(3000 + i * 250, 100u + i);
+    std::vector<uint8_t> out;
+    PushAll(enc, data.data(), data.size(), out);
+    FinishAll(enc, out);
+    EXPECT_EQ(Decode(out, data.size()), data) << "stream " << i;
+    ASSERT_EQ(gcomp_encoder_reset(enc), GCOMP_OK) << "stream " << i;
+  }
+}
 
 //
 // Encoder Reset Tests
