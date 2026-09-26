@@ -348,6 +348,29 @@ gcomp_decoder_create(registry, "zstd", opts, &dec);
 
 If the frame header specifies a dictionary ID and the decoder was created without a dictionary (or with a different ID for formatted dictionaries), the decoder returns `GCOMP_ERR_UNSUPPORTED` or `GCOMP_ERR_CORRUPT` with a message indicating the required dictionary ID. Raw dictionaries (no magic) are accepted for any frame dictionary ID to support external encoders that use content-derived IDs.
 
+### Dictionaries with threads
+
+A dictionary works at every `threads.count`. Each job is handed the dictionary's
+content as the history in front of it — the same mechanism that gives a job the
+tail of the job before it — so every job can match into it, and the dictionary
+survives a `GCOMP_FLUSH_FULL` because the frame that follows declares the same
+Dictionary_ID.
+
+**Before 2026-09-26 it did not.** `zstd.dictionary` with `threads.count > 1` was
+accepted, returned `GCOMP_OK`, and was silently ignored: on 1.5 MB whose content
+the dictionary held, one thread produced 163 bytes and four threads 65,705, the
+same as with no dictionary at all. The frame header still declared the
+Dictionary_ID, so the output *hard-required* a dictionary it had never used — a
+decoder without it fails, and a caller had to keep one for no benefit. If you have
+archives written by a parallel encoder before that date, they are decodable and
+correct, just larger than they should be and tied to a dictionary they do not need.
+
+What a formatted dictionary's entropy section contributes is unchanged by thread
+count, because the encoder does not use it in either mode: the Huffman and FSE
+tables are read only by the decoder, and the three repeat offsets change no output
+(measured — see `RepeatOffsetsDoNotChangeTheOutput`, which is the tripwire for
+that stopping being true).
+
 ### Dictionary format
 
 - **Raw**: Any bytes, no magic. `dict_id` is 0; encoder can still set `zstd.dictionary_id` in the header for identification.
