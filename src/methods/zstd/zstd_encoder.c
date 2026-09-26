@@ -628,6 +628,62 @@ static gcomp_status_t zstd_encoder_collect_one_parallel_result(
  * without making the jobs depend on each other's RESULTS -- only on their
  * input, which the encoder already holds.
  */
+/**
+ * @brief Put the dictionary in front of the first job of a frame.
+ *
+ * A dictionary is history: bytes that came before the content, available to
+ * match against and not emitted. That is exactly what the overlap buffer
+ * already means to a job - @ref zstd_encoder_seed_parallel_job copies it to the
+ * front of the job's input, the worker indexes it into the match finder and the
+ * long-distance table, and compresses only what follows it. So a dictionary
+ * needs no mechanism of its own here; it needs to be in that buffer when a
+ * frame starts.
+ *
+ * Until 2026-09-26 it was not, and `zstd_parallel.c` had no mention of a
+ * dictionary at all. Nothing refused the combination either, so
+ * `zstd.dictionary` with `threads.count > 1` was accepted, reported GCOMP_OK,
+ * and did nothing: measured on 8,800 bytes whose content the dictionary held,
+ * one thread went 61 bytes to 17 and four threads stayed at 64. Worse than the
+ * lost ratio, the frame header still declared the Dictionary_ID, so the output
+ * hard-required a dictionary it had never used - a decoder without it fails, and
+ * a caller had to keep one for no benefit.
+ *
+ * Only the *content* goes in. A formatted dictionary's entropy tables and
+ * repeat offsets are a separate matter, handled per job where the blocks are
+ * built; a job that does not use them writes its own tables, which is always
+ * valid, so this alone is correct rather than merely better.
+ *
+ * The tail is what is kept when the dictionary is longer than the window, which
+ * is what the single-threaded path does with `mf_window` for the same reason: a
+ * match may not reach further back than the window the frame header declares
+ * (RFC 8878 section 3.1.1.1.2).
+ *
+ * @param state Encoder state.
+ */
+static void zstd_encoder_seed_parallel_dictionary(
+    zstd_encoder_state_t * state) {
+  state->parallel_overlap_len = 0;
+  if (!state->parallel_overlap_buf || !state->dict_parsed.content ||
+      state->dict_parsed.content_size == 0) {
+    return;
+  }
+  size_t cap = state->parallel_overlap_cap;
+  if (cap > state->mf_window_max) {
+    cap = state->mf_window_max;
+  }
+  if (cap == 0) {
+    return;
+  }
+  size_t take = state->dict_parsed.content_size;
+  const uint8_t * from = state->dict_parsed.content;
+  if (take > cap) {
+    from += take - cap;
+    take = cap;
+  }
+  memcpy(state->parallel_overlap_buf, from, take);
+  state->parallel_overlap_len = (uint32_t)take;
+}
+
 static void zstd_encoder_seed_parallel_job(zstd_encoder_state_t * state) {
   if (!state->parallel_job) {
     return;
@@ -894,7 +950,12 @@ static gcomp_status_t zstd_encoder_rearm_parallel_frame(
   // The history the jobs actually see.  Without this the next job opens with
   // the previous frame's tail in front of it and matches into it freely, which
   // is what GCOMP_FLUSH_FULL exists to prevent.
-  state->parallel_overlap_len = 0;
+  //
+  // A dictionary survives it, because the new frame declares the same
+  // Dictionary_ID and the single-threaded rearm puts it back for the same
+  // reason: what a full flush drops is the *stream* before it, not the history
+  // the caller supplied.
+  zstd_encoder_seed_parallel_dictionary(state);
   zstd_encoder_seed_parallel_job(state);
 
   state->header.content_size_present = false;
@@ -1551,6 +1612,12 @@ gcomp_status_t zstd_encoder_init(gcomp_registry_t * registry,
       gcomp_memory_track_alloc(
           &state->mem_tracker, state->parallel_overlap_cap);
     }
+
+    // The dictionary is the history the first job has, and the job was
+    // allocated above this - before the buffer existed - so it is seeded here
+    // rather than there.
+    zstd_encoder_seed_parallel_dictionary(state);
+    zstd_encoder_seed_parallel_job(state);
 
     // Parallel jobs emit blocks only, so the frame header is this encoder's
     // to write, exactly as in single-threaded mode.  Staging it as the first
@@ -2477,7 +2544,7 @@ gcomp_status_t zstd_encoder_reset(gcomp_encoder_t * encoder) {
     // That was invisible until short blocks with history started being
     // compressed at all: every input below MIN_COMPRESSION_SIZE used to be
     // stored raw, which hid the stale history rather than fixing it.
-    state->parallel_overlap_len = 0;
+    zstd_encoder_seed_parallel_dictionary(state);
     zstd_encoder_seed_parallel_job(state);
     status = zstd_write_frame_header(&state->header, state->parallel_output_buf,
         state->parallel_output_buf_cap, &state->header_len);

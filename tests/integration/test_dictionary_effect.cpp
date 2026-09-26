@@ -114,6 +114,54 @@ size_t encode_with_dict(const char * method, const std::vector<uint8_t> & input,
 }
 
 /**
+ * @brief As encode_with_dict, with a thread count instead of a level.
+ *
+ * Deliberately a second function rather than another parameter on the first:
+ * every caller of that one is a level sweep, and adding a thread argument to it
+ * would have let the combination look covered while no test passed anything but
+ * the default.
+ */
+size_t encode_with_dict_threads(const std::vector<uint8_t> & input,
+    const std::vector<uint8_t> * dict, uint64_t threads) {
+  gcomp_options_t * o = nullptr;
+  EXPECT_EQ(gcomp_options_create(&o), GCOMP_OK);
+  EXPECT_EQ(gcomp_options_set_uint64(o, "threads.count", threads), GCOMP_OK);
+  if (dict) {
+    EXPECT_EQ(gcomp_options_set_bytes(
+                  o, "zstd.dictionary", dict->data(), dict->size()),
+        GCOMP_OK);
+  }
+
+  size_t bound = 0;
+  EXPECT_EQ(
+      gcomp_encode_bound(nullptr, "zstd", o, input.size(), &bound), GCOMP_OK);
+  std::vector<uint8_t> out(bound ? bound : 1);
+  size_t written = 0;
+  EXPECT_EQ(gcomp_encode_buffer(nullptr, "zstd", o, input.data(), input.size(),
+                out.data(), out.size(), &written),
+      GCOMP_OK)
+      << "threads=" << threads;
+
+  EXPECT_EQ(gcomp_options_set_bool(o, "zstd.concat", 1), GCOMP_OK);
+  EXPECT_EQ(gcomp_options_set_uint64(o, "limits.max_expansion_ratio", 0),
+      GCOMP_OK);
+  std::vector<uint8_t> back(input.size() + 65536);
+  size_t produced = 0;
+  EXPECT_EQ(gcomp_decode_buffer(nullptr, "zstd", o, out.data(), written,
+                back.data(), back.size(), &produced),
+      GCOMP_OK)
+      << "threads=" << threads << ": dictionary stream did not decode";
+  EXPECT_EQ(produced, input.size()) << "threads=" << threads;
+  if (produced == input.size() && produced > 0) {
+    EXPECT_EQ(std::memcmp(back.data(), input.data(), produced), 0)
+        << "threads=" << threads;
+  }
+
+  gcomp_options_destroy(o);
+  return written;
+}
+
+/**
  * @brief The dictionary reaches the match finder, at every level.
  *
  * Payload identical to the dictionary: one long match, and almost nothing
@@ -136,6 +184,153 @@ TEST(DictionaryEffect, ZstdUsesTheDictionaryAtEveryLevel) {
     EXPECT_LT(with * 10, without)
         << "zstd level " << level << ": " << with << " with a dictionary "
         << "against " << without << " without";
+  }
+}
+
+/**
+ * @brief The same, with threads, which is where it was not true at all.
+ *
+ * `zstd.dictionary` with `threads.count > 1` was accepted, reported GCOMP_OK,
+ * and did nothing. `zstd_parallel.c` had no mention of a dictionary anywhere and
+ * nothing refused the combination, so the option was silently inert above one
+ * thread - and the frame header still declared the Dictionary_ID, which made the
+ * output hard-require a dictionary it had never used.
+ *
+ * Measured before the fix, on 8,800 bytes whose content the dictionary held:
+ * one thread went 61 bytes to 17, four threads stayed at 64.
+ *
+ * Nothing existing could see it. Every dictionary test above goes through
+ * `gcomp_encode_buffer()` with no thread option, and every parallel test uses no
+ * dictionary, so the combination had no coverage in either direction - and a
+ * round trip passes regardless, because a dictionary that is loaded and never
+ * consulted produces a perfectly ordinary stream.
+ *
+ * Enough input to be several jobs is the point of the size: one job would let a
+ * fix that only seeded the first job pass.
+ */
+TEST(DictionaryEffect, ZstdUsesTheDictionaryAtEveryThreadCount) {
+  const std::vector<uint8_t> dict = distinct_prefixes(65536, 4242);
+  // The dictionary repeated, so every job's content is matchable against it and
+  // the input spans several default 512 KB jobs.
+  std::vector<uint8_t> payload;
+  for (int i = 0; i < 24; i++) {
+    payload.insert(payload.end(), dict.begin(), dict.end());
+  }
+
+  size_t single_with = 0;
+  for (uint64_t threads : {(uint64_t)1, (uint64_t)2, (uint64_t)4}) {
+    const size_t without =
+        encode_with_dict_threads(payload, nullptr, threads);
+    const size_t with = encode_with_dict_threads(payload, &dict, threads);
+    if (threads == 1) {
+      single_with = with;
+    }
+
+    EXPECT_LT(with * 4, without)
+        << "threads=" << threads << ": " << with << " bytes with a dictionary "
+        << "against " << without << " without - the dictionary is not reaching "
+           "the jobs' match finders";
+
+    // And it is worth about what it is worth single-threaded. A parallel job
+    // sees the dictionary plus a window of the real stream, so the figures are
+    // close but not equal; a factor of two is the bound that separates "the
+    // dictionary is being used" from "only the first job got it".
+    EXPECT_LT(with, single_with * 2 + 4096)
+        << "threads=" << threads << ": " << with
+        << " bytes against " << single_with << " on one thread";
+  }
+}
+
+/**
+ * @brief A dictionary survives a full flush in parallel mode.
+ *
+ * Each frame after the flush declares the same Dictionary_ID, so the dictionary
+ * applies to it too - that is what the single-threaded rearm does, and what a
+ * full flush drops is the stream before it rather than the history the caller
+ * supplied. Without this the second frame would claim a dictionary it had
+ * stopped using, which is the same false dependency in a new place.
+ */
+TEST(DictionaryEffect, ZstdKeepsTheDictionaryAcrossAParallelFullFlush) {
+  const std::vector<uint8_t> dict = distinct_prefixes(65536, 7777);
+  std::vector<uint8_t> half;
+  for (int i = 0; i < 12; i++) {
+    half.insert(half.end(), dict.begin(), dict.end());
+  }
+
+  auto run = [&](uint64_t threads, bool with_dict) {
+    gcomp_options_t * o = nullptr;
+    EXPECT_EQ(gcomp_options_create(&o), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_uint64(o, "threads.count", threads), GCOMP_OK);
+    if (with_dict) {
+      EXPECT_EQ(gcomp_options_set_bytes(
+                    o, "zstd.dictionary", dict.data(), dict.size()),
+          GCOMP_OK);
+    }
+    gcomp_registry_t * reg = gcomp_registry_default();
+    gcomp_encoder_t * enc = nullptr;
+    EXPECT_EQ(gcomp_encoder_create(reg, "zstd", o, &enc), GCOMP_OK);
+    if (!enc) {
+      gcomp_options_destroy(o);
+      return (size_t)0;
+    }
+
+    std::vector<uint8_t> out;
+    std::vector<uint8_t> win(65536);
+    auto push = [&](const uint8_t * d, size_t n) {
+      gcomp_buffer_t in = {const_cast<uint8_t *>(d), n, 0};
+      while (in.used < in.size) {
+        gcomp_buffer_t ob = {win.data(), win.size(), 0};
+        EXPECT_EQ(gcomp_encoder_update(enc, &in, &ob), GCOMP_OK);
+        out.insert(out.end(), win.begin(), win.begin() + ob.used);
+      }
+    };
+    push(half.data(), half.size());
+    for (;;) {
+      gcomp_buffer_t ob = {win.data(), win.size(), 0};
+      const gcomp_status_t st =
+          gcomp_encoder_flush(enc, &ob, GCOMP_FLUSH_FULL);
+      out.insert(out.end(), win.begin(), win.begin() + ob.used);
+      if (st == GCOMP_OK) {
+        break;
+      }
+      EXPECT_EQ(st, GCOMP_ERR_LIMIT);
+    }
+    // The second half after the flush is what the dictionary has to still be
+    // serving: the stream before it has been dropped, so the dictionary is the
+    // only history left.
+    push(half.data(), half.size());
+    for (;;) {
+      gcomp_buffer_t ob = {win.data(), win.size(), 0};
+      const gcomp_status_t st = gcomp_encoder_finish(enc, &ob);
+      out.insert(out.end(), win.begin(), win.begin() + ob.used);
+      if (st == GCOMP_OK) {
+        break;
+      }
+      EXPECT_EQ(st, GCOMP_ERR_LIMIT);
+    }
+    gcomp_encoder_destroy(enc);
+
+    // It must still read back, with the dictionary the header names.
+    gcomp_options_set_bool(o, "zstd.concat", 1);
+    gcomp_options_set_uint64(o, "limits.max_expansion_ratio", 0);
+    std::vector<uint8_t> back(half.size() * 2 + 65536);
+    size_t produced = 0;
+    EXPECT_EQ(gcomp_decode_buffer(nullptr, "zstd", o, out.data(), out.size(),
+                  back.data(), back.size(), &produced),
+        GCOMP_OK)
+        << "threads=" << threads;
+    EXPECT_EQ(produced, half.size() * 2) << "threads=" << threads;
+    gcomp_options_destroy(o);
+    return out.size();
+  };
+
+  for (uint64_t threads : {(uint64_t)1, (uint64_t)4}) {
+    const size_t without = run(threads, false);
+    const size_t with = run(threads, true);
+    EXPECT_LT(with * 4, without)
+        << "threads=" << threads << ": " << with
+        << " bytes with a dictionary across a full flush against " << without
+        << " without - the flush dropped the dictionary along with the stream";
   }
 }
 
