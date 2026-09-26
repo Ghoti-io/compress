@@ -271,7 +271,9 @@ long match may not reach past the declared window in any case (RFC 8878
 the reference's design of scanning once in the calling thread answers a problem
 this encoder does not have.
 
-`zstd.job_size` does not change the reach, only where the block seams fall.
+`zstd.job_size` does not change the reach, only where the block seams fall — but
+it does decide how much of each job's work is a repeat of the job before it, which
+is what [Job size configuration](#job-size-configuration) is about.
 
 ## Content checksum
 
@@ -393,7 +395,7 @@ gcomp_encoder_create(registry, "zstd", opts, &enc);
 
 ### How it works
 
-1. Input data is accumulated until `zstd.job_size` bytes are buffered (512 KB when the option is left at 0)
+1. Input data is accumulated until `zstd.job_size` bytes are buffered (four windows, clamped to 512 KB - 16 MB, when the option is left at 0 — see [Job size configuration](#job-size-configuration) for why it follows the window)
 2. Each full job is submitted to a thread pool for compression
 3. Each job compresses its slice into a run of **blocks** — not a frame
 4. Those blocks are collected in submission order and written to the output
@@ -422,13 +424,53 @@ gcomp_encoder_create(registry, "zstd", opts, &enc);
 
 | `zstd.job_size` | Behavior |
 |-----------------|----------|
-| 0 (default) | 512 KB, whatever the level is |
+| 0 (default) | **Four windows, clamped to 512 KB - 16 MB.** At the default level that is 512 KB; at `zstd.window_log = 21` it is 8 MB |
 | 64 KB - 16 MB | Used as given |
 | anything else | `gcomp_encoder_create()` returns `GCOMP_ERR_INVALID_ARG`, with an error detail naming the bounds |
 
 Out-of-range values are **rejected, not clamped**: `zstd.job_size = 1024`
 fails rather than quietly becoming 64 KB, so a caller who asked for something
 the encoder will not do hears about it.
+
+#### Why the default follows the window
+
+This is the one setting that decides whether threads help at all, so it is worth
+understanding rather than accepting.
+
+Every job is seeded with a **window** of the preceding stream and indexes it
+before compressing its own `job_size` bytes, which is what lets a job match into
+the one before it. That work is redundant — the job before it indexed the same
+bytes — so the wasted effort per useful byte is `window_size / job_size`. With a
+fixed 512 KB job that ratio *was* the window size in disguise, and it dominated:
+at four threads against one, on 64 MB of highly compressible input, a fixed job
+gave 0.58× at `window_log` 17, 0.29× at 19, 0.19× at 21 and **0.09×** at 25.
+Scaling the job with the window puts all of those between 0.67× and 0.81×.
+
+Until 2026-09-26 the default was a fixed 512 KB whatever the level was, and since
+the level picks the window, asking for a bigger window quietly asked for a worse
+thread scaling. Raising `zstd.window_log`, or enabling `zstd.long` and then
+raising it, was the way callers met this.
+
+**Two things scaling the job does not fix**, both worth knowing before you count
+on threads:
+
+- **Input smaller than about two jobs cannot be split.** 256 KB against a 512 KB
+  job is one job, so the threads are pure overhead — measured at 0.34× on four.
+  If you are compressing many small objects, compress them on one thread each
+  rather than asking one encoder for threads.
+- **Above `window_log` 21 the 16 MB ceiling bites**, so the ratio cannot be
+  brought all the way down and large-window parallel encoding stays below one
+  thread on input that compresses very fast. Set `zstd.job_size` yourself if you
+  want to trade memory for it.
+
+Larger jobs also compress very slightly *better*, because there are fewer job
+seams: one 64 MB case went from 14,479 bytes to 13,859.
+
+Memory is the cost. Each in-flight job holds `job_size + window` of input, so a
+bigger job multiplies by however many jobs are in flight; it is all counted
+against `limits.max_memory_bytes`, which will refuse the encoder rather than
+overshoot. `notes/compress/PERFORMANCE.md` has the full sweep and the machine it
+was taken on.
 
 The default does not vary with the level or the window, which matters at the
 top of the ladder: level 19 declares a 32 MB window and still takes 512 KB

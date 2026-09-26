@@ -354,15 +354,74 @@ gcomp_status_t zstd_parallel_create(
 
   uint32_t num_threads = config ? config->num_threads : 0;
 
+  // The automatic job size follows the window, and that is the whole of what
+  // decides whether threads help.
+  //
+  // Every job is seeded with a window of the preceding stream and indexes it
+  // into the hash, chain and long-distance tables before compressing its own
+  // job_size bytes (see the overlap block in zstd_parallel_compress_blocks).
+  // The job before it indexed the same bytes, so the wasted work per useful byte
+  // is window_size / job_size - and a fixed 512 KiB job made that ratio the
+  // window size in disguise.  Four threads against one, 64 MiB of highly
+  // compressible input, fixed job against scaled:
+  //
+  //     window_log 17 (128 KiB)    0.58x -> 0.74x
+  //     window_log 19 (512 KiB)    0.29x -> 0.74x
+  //     window_log 21 (2 MiB)      0.19x -> 0.81x
+  //     window_log 25 (32 MiB)     0.09x -> 0.80x
+  //
+  // **Four windows, and the multiplier was measured rather than guessed**: it is
+  // a trade that runs in opposite directions for the two input shapes, so no
+  // value wins everywhere.  Against eight windows:
+  //
+  //                         compressible        prose-like
+  //     window_log 17     4x 0.68  8x 0.98    4x 2.91  8x 2.78
+  //     window_log 19     4x 0.74  8x 0.98    4x 2.60  8x 2.31
+  //     window_log 21     4x 0.95  8x 1.03    4x 1.90  8x 1.56
+  //     window_log 23     4x 0.70  8x 0.70    4x 1.06  8x 0.98
+  //
+  // Eight buys parity on input that compresses so fast there is nothing left to
+  // parallelise; four keeps up to 18% more of the speedup on the shape callers
+  // actually have.  Both remove the pathology equally - worst case 0.70x either
+  // way, against 0.09x - so the tie-break is the realistic shape.
+  //
+  // notes/compress/PERFORMANCE.md has the sweep, the shapes and the machine load.
+  // Two things this does not fix: input below about two jobs cannot be split at
+  // all, and above window_log 21 the clamp bites so the ratio cannot come all the
+  // way down.  Larger jobs also compress very slightly BETTER, there being fewer
+  // job seams: 14,479 bytes became 13,859 on one 64 MiB case.
+  uint32_t effective_window_log =
+      (config && config->window_log) ? (uint32_t)config->window_log : 0u;
+  if (effective_window_log == 0u) {
+    effective_window_log = (uint32_t)zstd_level_to_window_log(
+        config ? config->compression_level : ZSTD_LEVEL_DEFAULT);
+  }
+  if (effective_window_log > 31u) {
+    effective_window_log = 31u;
+  }
   uint64_t job_size = ZSTD_DEFAULT_JOB_SIZE;
   if (config && config->job_size > 0) {
     job_size = config->job_size;
-    if (job_size < ZSTD_MIN_JOB_SIZE) {
-      job_size = ZSTD_MIN_JOB_SIZE;
+  }
+  else {
+    // A caller who names no job size gets one scaled to the window, never
+    // smaller than the figure this defaulted to before.
+    const uint64_t window_bytes = (uint64_t)1u << effective_window_log;
+    if (window_bytes <= (UINT64_MAX / 4u)) {
+      const uint64_t scaled = window_bytes * 4u;
+      if (scaled > job_size) {
+        job_size = scaled;
+      }
     }
-    if (job_size > ZSTD_MAX_JOB_SIZE) {
+    else {
       job_size = ZSTD_MAX_JOB_SIZE;
     }
+  }
+  if (job_size < ZSTD_MIN_JOB_SIZE) {
+    job_size = ZSTD_MIN_JOB_SIZE;
+  }
+  if (job_size > ZSTD_MAX_JOB_SIZE) {
+    job_size = ZSTD_MAX_JOB_SIZE;
   }
 
   zstd_parallel_ctx_t * ctx =

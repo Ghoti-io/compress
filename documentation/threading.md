@@ -389,8 +389,35 @@ Methods may define additional threading-related options beyond `threads.count`:
 
 | Option | Used By | Description |
 |--------|---------|-------------|
-| `zstd.job_size` | Zstd | Size of each parallel compression job |
+| `zstd.job_size` | Zstd | Size of each parallel compression job; defaults to four windows, clamped to 512 KB - 16 MB |
 | `lz4.block_size` | LZ4 | Block size, which is also LZ4's parallel job size |
+
+### What decides whether threads help
+
+Worth reading before sizing a workload around `threads.count`, because the answer
+depends on the input more than on the core count. Measured on this machine at four
+threads against one, with 64 MB of input:
+
+| Input | Speedup |
+|---|---|
+| Prose-like text | 2.6x - 2.9x |
+| Incompressible bytes | ~2.2x |
+| One pattern repeated (serial already ~2 GB/s) | ~0.7x |
+
+Two rules come out of that:
+
+- **There has to be work to parallelise.** On input a single thread already
+  compresses at gigabytes per second there is nothing to win, and the per-job
+  cost shows through. That is not a defect; it is the ceiling.
+- **The input has to be worth more than about two jobs.** 256 KB against a
+  512 KB job is one job, so threads are pure overhead - 0.34x at four. Compress
+  many small objects one thread each instead.
+
+For zstd there is a third, and it is why `zstd.job_size` now follows the window
+rather than sitting at a fixed 512 KB: each job re-indexes a window of the
+preceding stream, so the wasted work per useful byte is `window_size / job_size`.
+See [zstd's job size section](modules/zstd.md#job-size-configuration).
+`notes/compress/PERFORMANCE.md` has the sweep.
 
 ## Existing Implementations
 

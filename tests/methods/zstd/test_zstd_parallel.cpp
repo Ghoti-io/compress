@@ -1064,6 +1064,93 @@ std::vector<uint8_t> WordyText(size_t n) {
 } // namespace
 
 /**
+ * @brief The automatic job size follows the window, exactly.
+ *
+ * `zstd.job_size = 0` means four windows, clamped to 512 KB - 16 MB, and this
+ * pins that formula through the public API rather than trusting the constant.
+ * The job size decides where block seams fall, so the output bytes are the
+ * observable: an automatic encode must be byte-identical to the same encode with
+ * the figure spelled out, and must differ from the fixed 512 KB this used to
+ * default to.
+ *
+ * ## Why the formula and not just "it is not slower"
+ *
+ * The reason for it is a throughput one - each job re-indexes a window of the
+ * preceding stream, so wasted work per useful byte is window/job, and a fixed
+ * 512 KB job made four threads 0.09x of one at window_log 25. But a timing
+ * assertion on a shared machine is a flaky test, and the multiplier was chosen by
+ * measurement that a test cannot repeat cheaply (four against eight windows, two
+ * input shapes; see notes/compress/PERFORMANCE.md). So what is gated here is the
+ * decision, not the speed: if somebody changes the multiplier or returns to a
+ * fixed size, this fails and points at the measurement.
+ *
+ * The default level is checked too, and it is the reassuring half: window_log 17
+ * gives 4 x 128 KB = 512 KB, exactly what callers had before, so no existing
+ * parallel encode changed shape.
+ */
+TEST(ZstdParallel, AutomaticJobSizeIsFourWindows) {
+  gcomp_registry_t * registry = gcomp_registry_default();
+  ASSERT_NE(registry, nullptr);
+  // Several jobs' worth at the largest window tested, so a seam difference is
+  // actually reachable.
+  const std::vector<uint8_t> data = WordyText(40u * 1024u * 1024u);
+
+  auto encode = [&](uint64_t window_log, uint64_t job_size) {
+    gcomp_options_t * o = nullptr;
+    EXPECT_EQ(gcomp_options_create(&o), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_uint64(o, "threads.count", 4), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_uint64(o, "zstd.window_log", window_log),
+        GCOMP_OK);
+    if (job_size) {
+      EXPECT_EQ(gcomp_options_set_uint64(o, "zstd.job_size", job_size),
+          GCOMP_OK);
+    }
+    size_t bound = 0;
+    EXPECT_EQ(gcomp_encode_bound(registry, "zstd", o, data.size(), &bound),
+        GCOMP_OK);
+    std::vector<uint8_t> out(bound);
+    size_t w = 0;
+    EXPECT_EQ(gcomp_encode_buffer(registry, "zstd", o, data.data(),
+                  data.size(), out.data(), out.size(), &w),
+        GCOMP_OK)
+        << "window_log=" << window_log << " job_size=" << job_size;
+    out.resize(w);
+    gcomp_options_destroy(o);
+    return out;
+  };
+
+  struct Case {
+    uint64_t window_log;
+    uint64_t expected_job;
+  };
+  // 4 x window, clamped to [512 KB, 16 MB].
+  const std::vector<Case> cases = {
+      {15, 524288u},   // 4 x 32 KB = 128 KB, floored at 512 KB
+      {17, 524288u},   // 4 x 128 KB = 512 KB exactly - the old default
+      {19, 2097152u},  // 4 x 512 KB
+      {21, 8388608u},  // 4 x 2 MB
+      {23, 16777216u}, // 4 x 8 MB = 32 MB, capped at 16 MB
+  };
+
+  for (const auto & c : cases) {
+    const std::vector<uint8_t> automatic = encode(c.window_log, 0);
+    const std::vector<uint8_t> spelled = encode(c.window_log, c.expected_job);
+    EXPECT_EQ(automatic, spelled)
+        << "window_log=" << c.window_log
+        << ": the automatic job size is not " << c.expected_job
+        << " bytes; the default no longer follows the window as four times it";
+
+    if (c.expected_job != 524288u) {
+      const std::vector<uint8_t> fixed = encode(c.window_log, 524288u);
+      EXPECT_NE(automatic, fixed)
+          << "window_log=" << c.window_log
+          << ": the automatic job size still behaves like a fixed 512 KB, which "
+             "is the setting that made four threads slower than one";
+    }
+  }
+}
+
+/**
  * @brief Compress with threads and read it back.
  */
 static void ExpectThreadedRoundTrip(gcomp_registry_t * registry,
