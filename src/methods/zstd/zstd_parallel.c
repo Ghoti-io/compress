@@ -242,6 +242,7 @@ static gcomp_status_t zstd_parallel_compress_blocks(
   temp_state.mf_window_capacity = job->mf_window_capacity;
   temp_state.mf_window_max = job->mf_window_max;
   temp_state.mf_window_len = 0;
+  temp_state.mf_window_start = 0;
 
   // The finder is reused between jobs, so it starts clean.  Then the overlap
   // -- the tail of the job before this one -- goes in as history and is
@@ -476,7 +477,8 @@ gcomp_status_t zstd_parallel_create(
       // Each job now carries a copy of the preceding overlap as well.
       size_t overlap_estimate = (size_t)ctx->overlap_size;
       size_t per_job_memory = job_size + overlap_estimate +
-          (size_t)window_size + ZSTD_BLOCK_SIZE_MAX +
+          (size_t)window_size +
+          zstd_window_slack(window_size, ZSTD_BLOCK_SIZE_MAX) +
           (job_size + ZSTD_FRAME_OVERHEAD) +
           (sizeof(uint32_t) * (1UL << 14)) + (sizeof(uint32_t) * window_size) +
           (job_size / 3 * sizeof(zstd_sequence_t)) + job_size;
@@ -623,7 +625,13 @@ gcomp_status_t zstd_parallel_alloc_job(
   if ((uint64_t)mf_win_max < (uint64_t)mf_block_max) {
     mf_block_max = mf_win_max;
   }
-  size_t mf_win_cap = (size_t)mf_win_max + mf_block_max;
+  // Room past one window, so that dropping history inside a job is a pointer
+  // move rather than a copy of the whole window.  A job slides exactly as the
+  // single-threaded encoder does and paid the same for it: four threads at
+  // window_log 25 went from 109 to 400 MiB/s.  zstd_window_slack() has the
+  // measurement and the divisor sweep behind it.
+  size_t mf_win_cap =
+      (size_t)mf_win_max + zstd_window_slack(mf_win_max, mf_block_max);
   uint8_t * mf_window_buf = gcomp_malloc(ctx->allocator, mf_win_cap);
   if (!mf_window_buf) {
     if (ctx->mem_tracker) {

@@ -217,6 +217,43 @@ When `zstd.window_log=0` (the default) the window comes from the level, as
 above. Setting it explicitly overrides the level, and the decoder enforces
 `limits.max_window_bytes` against whatever the frame declares.
 
+#### What a large window costs
+
+Memory, and no longer much else. The encoder holds one window of history
+followed by the block it is compressing, and keeps a chain table of four bytes
+per window byte — so a 32 MB window is 160 MB of encoder, of which the window
+buffer is the smaller part. The buffer is allocated a quarter of a window past
+the window itself, so that dropping history is a pointer move; that quarter is
+the whole of the memory this costs over a window plus one block.
+
+It used to cost time as well, and steeply. History leaving the window was
+dropped by moving the remaining bytes to the front of the buffer, once per
+128 KB block, so a 32 MB window moved 256 bytes for every byte compressed —
+8 GiB of `memmove` to compress 64 MB, which was 91% of the encode. **UNIT: MB
+of uncompressed input per second**, 64 MB of an 8 KB pattern, which is the shape
+that shows it because its own compression is nearly free:
+
+| Window | One thread | Four threads |
+|---|---|---|
+| 128 KB, 512 KB | unchanged | unchanged |
+| 2 MB | 1,175 → 1,620 | 1,008 → 1,209 |
+| 8 MB | 478 → 1,323 | 302 → 747 |
+| 32 MB | 126 → **1,340** | 109 → **400** |
+
+On prose the same change is 38.4 → 54.1 MB/s serial and 77.4 → 116.6 on four
+threads at a 32 MB window, and nothing at all at 512 KB. Output is byte for byte
+identical either way, at every window and thread count — the encoder sees exactly
+the same history, it just stops copying it.
+
+Two consequences worth knowing:
+
+- **A window larger than your data is no longer expensive**, only wasteful of
+  memory. Before this it was both.
+- **Threads help less on input that compresses very fast**, because the serial
+  encoder got most of the gain: the pattern above went from 0.87x at a 32 MB
+  window to 0.30x on four threads against one, while the absolute rate rose from
+  109 to 400 MB/s. On prose, thread scaling is unchanged at about 2.2x.
+
 ## Long-distance matching
 
 The ordinary match finder reaches about 8 MB back. A file holding two copies
@@ -274,6 +311,13 @@ this encoder does not have.
 `zstd.job_size` does not change the reach, only where the block seams fall — but
 it does decide how much of each job's work is a repeat of the job before it, which
 is what [Job size configuration](#job-size-configuration) is about.
+
+**The overlap is not capped at the job size, and must not be.** Capping it is the
+obvious way to make each job's repeated work proportional to the job rather than
+to the window, and it destroys the ratio whenever real matches live further back
+than one job: on 64 MB whose only redundancy sat 1.5 MB apart, a 512 KB job with
+its overlap capped produced 67,110,409 bytes from 67,108,864 — nothing found at
+all — where the full window of overlap produced 1,578,909.
 
 ## Content checksum
 
@@ -458,26 +502,42 @@ on threads:
   job is one job, so the threads are pure overhead — measured at 0.34× on four.
   If you are compressing many small objects, compress them on one thread each
   rather than asking one encoder for threads.
-- **Above `window_log` 21 the 16 MB ceiling bites**, so the ratio cannot be
-  brought all the way down and large-window parallel encoding stays below one
-  thread on input that compresses very fast. Set `zstd.job_size` yourself if you
-  want to trade memory for it.
+- **Above `window_log` 21 the 16 MB ceiling bites**, so `window_size / job_size`
+  cannot be brought all the way down: at `window_log` 25 the job stops at 16 MB
+  against a 32 MB window, a ratio of 2. On input that compresses very fast that
+  now shows as 0.30x against one thread — worse as a *ratio* than it used to be,
+  because removing the window copy (see [What a large window
+  costs](#what-a-large-window-costs)) sped the single thread up more than it sped
+  the jobs up, while the absolute rate rose from 109 to 400 MB/s. On prose, four
+  threads still give about 2.2x at that window.
+
+  Raising the ceiling is not the fix it looks like: a job of four windows at
+  `window_log` 25 is 128 MB, which needs a gigabyte of input before four threads
+  each have one, and about 4 GB of working set. Capping each job's overlap at the
+  job size instead is worse — it is what the encoder must *not* do, because a job
+  then cannot match anything further back than its own length: on 64 MB whose only
+  redundancy sat 1.5 MB apart, a 512 KB job with its overlap capped produced
+  67,110,409 bytes from 67,108,864 — no compression at all — where the full window
+  of overlap produced 1,578,909.
 
 Larger jobs also compress very slightly *better*, because there are fewer job
 seams: one 64 MB case went from 14,479 bytes to 13,859.
 
-Memory is the cost. Each in-flight job holds `job_size + window` of input, so a
+Memory is the cost. Each in-flight job holds `job_size + window` of input and a
+match window of `window + window/4` (see [What a large window
+costs](#what-a-large-window-costs)), so a
 bigger job multiplies by however many jobs are in flight; it is all counted
 against `limits.max_memory_bytes`, which will refuse the encoder rather than
 overshoot. `notes/compress/PERFORMANCE.md` has the full sweep and the machine it
 was taken on.
 
-The default does not vary with the level or the window, which matters at the
-top of the ladder: level 19 declares a 32 MB window and still takes 512 KB
-jobs, so each job sees far less history than a single-threaded encode of the
-same input would.
-
-Larger job sizes provide better compression (more context for the match finder) but reduce parallelism. Smaller job sizes enable more parallelism but may reduce compression ratio slightly.
+Two paragraphs stood here until 2026-09-26 saying the opposite of the above, and
+both halves of them were wrong: that the default does not vary with the level or
+the window — it has followed the window since the section above was written — and
+that "each job sees far less history than a single-threaded encode of the same
+input would", which the [overlap](#with-threads) contradicts in this same
+document. A job is seeded with a whole window; what a larger job buys is fewer
+seams and less repeated indexing, not more reach.
 
 ### Output format
 

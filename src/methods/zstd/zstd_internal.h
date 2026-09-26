@@ -536,9 +536,22 @@ typedef struct {
   // point at data from an earlier block, which is what the window size in the
   // frame header promises the decoder (RFC 8878 section 3.1.1.1.2).
   uint8_t * mf_window;         ///< History followed by the current block
-  size_t mf_window_capacity;   ///< mf_window_max + one block
+  size_t mf_window_capacity;   ///< mf_window_max + zstd_window_slack()
+  /**
+   * @brief Where the history begins inside mf_window.
+   *
+   * Dropping history moves this forward rather than moving the bytes back; see
+   * zstd_window_slack().  The history the match finder is given therefore
+   * starts at `mf_window + mf_window_start`, not at `mf_window`, and only the
+   * compaction in zstd_block.c and the paths that seed the buffer from a
+   * dictionary may set it back to zero.
+   */
+  size_t mf_window_start;
   size_t mf_window_len;        ///< History bytes currently held
   size_t mf_window_max;        ///< Most history to keep; the declared window
+  /// Times the history was moved to the front of mf_window.  A diagnostic:
+  /// it must grow with input/slack, not with input/block_size.
+  uint64_t window_compactions;
 
   // Memory tracking
   /**
@@ -905,6 +918,70 @@ void zstd_write_block_header(
  * @return Window size in bytes
  */
 uint32_t zstd_window_log_to_size(uint8_t window_log);
+
+/**
+ * @brief How much room to leave past one window in the match window buffer.
+ *
+ * The buffer holds one window of history followed by the block being
+ * compressed, and history that falls out of the window has to be dropped from
+ * the front.  Dropping it by moving the bytes costs the whole window every
+ * time, and that happened once per block: at window_log 25 a 128 KB block into
+ * a 32 MB window is 256 bytes moved for every byte compressed.  Leaving room
+ * past the window instead lets the history start walking forward inside the
+ * buffer, so the bytes move only when the room runs out - once per `slack`
+ * bytes of input rather than once per block.
+ *
+ * **UNIT: MiB of uncompressed input per second**, 64 MB of an 8 KB pattern -
+ * the shape that shows this, because its own compression is nearly free, so the
+ * memmove is what is left.  Best of five in one process; the two libraries were
+ * built separately and run alternately, so machine load cancels.  Output is
+ * byte for byte identical either way, at every window_log and thread count.
+ *
+ *     window_log  window    one thread        four threads
+ *                           before  after     before  after
+ *     17          128 KB     2074   2085       1804   2050    (unchanged)
+ *     19          512 KB     1712   1732       1594   1683    (unchanged)
+ *     21            2 MB     1175   1620       1008   1209
+ *     23            8 MB      478   1323        302    747
+ *     25           32 MB      126   1340        109    400
+ *
+ * Nothing changes below window_log 21 because a quarter of a window is smaller
+ * than a block there and the floor below wins; 21 is where the slack first
+ * exceeds one block.  At window_log 25 the 64 MB case moved 8 GiB, and removing
+ * that was 91% of the encode.
+ *
+ * **A quarter is the figure, and it was measured rather than reasoned.**  More
+ * slack is monotonically faster on this shape and costs memory in proportion,
+ * so there is no knee to find - only a trade to price.  One library per divisor,
+ * one thread:
+ *
+ *     slack    window_log 21   window_log 23   window_log 25   buffer
+ *     none             1175             478             126    w + 1 block
+ *     w/8              1260            1002            1042    +12.5%
+ *     w/4              1506            1220            1233    +25%
+ *     w/2              1619            1377            1360    +50%
+ *     w                1771            1544            1452    +100%
+ *
+ * A quarter takes 90% of what a whole window of slack would at window_log 25,
+ * for a quarter more buffer rather than twice as much, and on input with
+ * realistic redundancy - where the match finder rather than the memmove is the
+ * bottleneck - everything from w/8 up is within a few per cent of the best.
+ * The window buffer is also the small allocation here: the chain table is four
+ * bytes per window byte, so a quarter more window buffer is 6% more memory at
+ * window_log 25, not 25%.  notes/compress/PERFORMANCE.md has the sweep.
+ *
+ * Never less than one block, because the buffer must always have room to append
+ * the block being compressed - that is the invariant the stream path in
+ * zstd_block.c relies on.
+ *
+ * @param window_max Declared window size in bytes
+ * @param block_max Largest block the encoder will append
+ * @return Bytes to allocate past @p window_max
+ */
+static inline size_t zstd_window_slack(size_t window_max, size_t block_max) {
+  const size_t quarter = window_max / 4u;
+  return quarter > block_max ? quarter : block_max;
+}
 
 /**
  * @brief Get window log from compression level.
@@ -1577,6 +1654,25 @@ gcomp_status_t zstd_compress_block_full(zstd_encoder_state_t * state,
  * @return The tally, owned by the encoder, or NULL if there is no state.
  */
 const gcomp_stepdown_tally_t * gcomp_zstd_encoder_stepdowns(
+    const gcomp_encoder_t * encoder);
+
+/**
+ * @brief Times the encoder moved its history to the front of the window buffer.
+ *
+ * Exists so that a test can assert the cost is amortised: the buffer holds a
+ * window plus zstd_window_slack() bytes, so the bytes move once per slack bytes
+ * of input.  Moving them once per block instead was 93% of the encode at
+ * window_log 25, and a throughput assertion is not something a test suite can
+ * make on a loaded machine - this count can be asserted exactly.
+ *
+ * Serial mode only.  A parallel job compresses into its own state and that
+ * state is discarded, which is the same reason the stepdown tally is empty
+ * above one thread.
+ *
+ * @param encoder Encoder to read; NULL returns 0.
+ * @return Compactions since the encoder was created or last reset.
+ */
+uint64_t gcomp_zstd_encoder_window_compactions(
     const gcomp_encoder_t * encoder);
 
 #ifdef __cplusplus

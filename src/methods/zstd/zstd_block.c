@@ -211,6 +211,15 @@ gcomp_status_t zstd_block_decompress_compressed(zstd_decoder_state_t * state,
  * @param state Encoder state.
  * @param shift Bytes to drop from the front.
  */
+/**
+ * @brief Drop @p shift bytes from the front of the history.
+ *
+ * This moves where the history starts, not the history itself.  Moving the
+ * bytes cost a whole window per block - 91% of the encode at window_log 25 -
+ * and the buffer is allocated with room past one window so that it does not
+ * have to; see zstd_window_slack(), which has the figures.  The compaction that
+ * does move them happens in the stream path below, when that room runs out.
+ */
 static void zstd_block_slide_window(
     zstd_encoder_state_t * state, size_t shift) {
   if (!state->mf_window || shift == 0) {
@@ -218,13 +227,30 @@ static void zstd_block_slide_window(
   }
   if (shift >= state->mf_window_len) {
     state->mf_window_len = 0;
+    state->mf_window_start = 0;
     zstd_mf_reset(state->match_finder);
     return;
   }
-  memmove(state->mf_window, state->mf_window + shift,
-      state->mf_window_len - shift);
+  state->mf_window_start += shift;
   state->mf_window_len -= shift;
   zstd_mf_slide(state->match_finder, shift);
+}
+
+/**
+ * @brief Bring the history back to the front of the buffer.
+ *
+ * The only place the window's bytes move.  Called when there is no longer room
+ * to append a block after the history, which with a quarter-window of slack is
+ * once per quarter window of input rather than once per block.
+ */
+static void zstd_block_compact_window(zstd_encoder_state_t * state) {
+  if (state->mf_window_start == 0) {
+    return;
+  }
+  memmove(state->mf_window, state->mf_window + state->mf_window_start,
+      state->mf_window_len);
+  state->mf_window_start = 0;
+  state->window_compactions++;
 }
 
 /**
@@ -314,29 +340,42 @@ gcomp_status_t zstd_block_compress(zstd_encoder_state_t * state,
       // zero times.
       //
       // The reason is an invariant rather than an accident.
-      // mf_window_capacity is mf_window_max + block_buffer_size; the slide at
-      // the end of a block below leaves mf_window_len at most mf_window_max;
-      // and a block the encoder produces is at most block_buffer_size. The
-      // three together make the sum here no larger than the capacity.
+      // mf_window_capacity is mf_window_max plus zstd_window_slack(), which is
+      // never less than block_buffer_size; the slide at the end of a block
+      // below leaves mf_window_len at most mf_window_max; and a block the
+      // encoder produces is at most block_buffer_size. The three together make
+      // the sum here no larger than the capacity.
       //
       // It stays because the invariant is not local. A parallel job supplies
       // its own mf_window_capacity (zstd_parallel.c), and the dictionary
       // paths set mf_window_len directly, so the guarantee is spread across
       // three files and would be cheap to break silently. Two lines of unhit
       // coverage are a smaller price than a window overrun.
+      //
+      // The history does not always begin at mf_window: dropping history moves
+      // mf_window_start forward instead of moving the bytes, so what runs out
+      // first is the room after it.  Compacting gives that room back, and the
+      // capacity is at least one window plus one block, so a history trimmed to
+      // one window always has room for the block once it is at the front.
+      if (state->mf_window_start + state->mf_window_len + input_len >
+          state->mf_window_capacity) {
+        zstd_block_compact_window(state);
+      }
       if (state->mf_window_len + input_len > state->mf_window_capacity) {
         size_t shift =
             state->mf_window_len + input_len - state->mf_window_capacity;
         zstd_block_slide_window(state, shift);
+        zstd_block_compact_window(state);
       }
+      uint8_t * const win = state->mf_window + state->mf_window_start;
       // A parallel job hands its own buffer over as the window, with the
       // block already sitting at mf_window_len inside it -- there is nothing
       // to copy and the source and destination are the same address, which
       // memcpy is not allowed to be given.
-      if (state->mf_window + state->mf_window_len != input) {
-        memcpy(state->mf_window + state->mf_window_len, input, input_len);
+      if (win + state->mf_window_len != input) {
+        memcpy(win + state->mf_window_len, input, input_len);
       }
-      mf_data = state->mf_window;
+      mf_data = win;
       start_pos = state->mf_window_len;
       mf_data_size = state->mf_window_len + input_len;
     }
@@ -368,7 +407,8 @@ gcomp_status_t zstd_block_compress(zstd_encoder_state_t * state,
             &num_sequences, state->literals_buffer, &literals_size,
             &state->rep_offset_1, &state->rep_offset_2, &state->rep_offset_3);
 
-    if (state->mf_window && mf_data == state->mf_window) {
+    if (state->mf_window
+        && mf_data == state->mf_window + state->mf_window_start) {
       // Keep the block as history for the next one, dropping whatever no
       // longer fits inside the declared window.
       state->mf_window_len = mf_data_size;

@@ -1382,7 +1382,8 @@ gcomp_status_t zstd_encoder_init(gcomp_registry_t * registry,
         (uint64_t)compressed_buffer_size + sizeof(zstd_match_finder_t) +
         (uint64_t)zstd_mf_memory_estimate(
             state->compression_level, state->mf_window_max) +
-        (uint64_t)state->mf_window_max + (uint64_t)block_buffer_size +
+        (uint64_t)state->mf_window_max +
+        (uint64_t)zstd_window_slack(state->mf_window_max, block_buffer_size) +
         (uint64_t)(block_buffer_size / 3) * sizeof(zstd_sequence_t) +
         (uint64_t)block_buffer_size;
 
@@ -1462,8 +1463,10 @@ gcomp_status_t zstd_encoder_init(gcomp_registry_t * registry,
   // block, followed by the block being compressed.  Its length is the window
   // size the frame header declares, which is what tells the decoder how far
   // back a sequence may point.
-  state->mf_window_capacity = state->mf_window_max + block_buffer_size;
+  state->mf_window_capacity = state->mf_window_max +
+      zstd_window_slack(state->mf_window_max, block_buffer_size);
   state->mf_window_len = 0;
+  state->mf_window_start = 0;
   state->mf_window = gcomp_malloc(alloc, state->mf_window_capacity);
   if (!state->mf_window) {
     status = GCOMP_ERR_MEMORY;
@@ -1486,10 +1489,12 @@ gcomp_status_t zstd_encoder_init(gcomp_registry_t * registry,
           state->dict_parsed.content + (take - state->mf_window_max),
           state->mf_window_max);
       state->mf_window_len = state->mf_window_max;
+      state->mf_window_start = 0;
     }
     else {
       memcpy(state->mf_window, state->dict_parsed.content, take);
       state->mf_window_len = take;
+      state->mf_window_start = 0;
     }
     zstd_mf_index_range(state->match_finder, state->mf_window, 0,
         state->mf_window_len, state->mf_window_len);
@@ -1709,6 +1714,16 @@ const gcomp_stepdown_tally_t * gcomp_zstd_encoder_stepdowns(
   }
   const zstd_encoder_state_t * state = (const zstd_encoder_state_t *)encoder->method_state;
   return &state->stepdowns;
+}
+
+uint64_t gcomp_zstd_encoder_window_compactions(
+    const gcomp_encoder_t * encoder) {
+  if (!encoder || !encoder->method_state) {
+    return 0u;
+  }
+  const zstd_encoder_state_t * state =
+      (const zstd_encoder_state_t *)encoder->method_state;
+  return state->window_compactions;
 }
 
 void zstd_encoder_destroy(gcomp_encoder_t * encoder) {
@@ -1942,6 +1957,7 @@ static void zstd_encoder_drop_history(zstd_encoder_state_t * state) {
     zstd_mf_reset(state->match_finder);
   }
   state->mf_window_len = 0;
+  state->mf_window_start = 0;
   if (state->mf_window && state->dict_parsed.content &&
       state->dict_parsed.content_size > 0) {
     size_t take = state->dict_parsed.content_size;
@@ -1952,6 +1968,7 @@ static void zstd_encoder_drop_history(zstd_encoder_state_t * state) {
     }
     memcpy(state->mf_window, from, take);
     state->mf_window_len = take;
+    state->mf_window_start = 0;
     zstd_mf_index_range(state->match_finder, state->mf_window, 0,
         state->mf_window_len, state->mf_window_len);
     // Taken now, while every hash head still names a dictionary position:
@@ -2562,8 +2579,10 @@ gcomp_status_t zstd_encoder_reset(gcomp_encoder_t * encoder) {
     state->stage = ZSTD_ENC_STAGE_HEADER;
 
     // A reset starts a new stream, so the record of what the previous one had
-    // to settle for does not carry into it.
+    // to settle for does not carry into it.  Nor does the window-compaction
+    // count, for the same reason: both are per-stream diagnostics.
     memset(&state->stepdowns, 0, sizeof(state->stepdowns));
+    state->window_compactions = 0u;
 
     // Reset positions (retain buffers)
     state->header_pos = 0;
@@ -2580,6 +2599,7 @@ gcomp_status_t zstd_encoder_reset(gcomp_encoder_t * encoder) {
       zstd_mf_reset(state->match_finder);
     }
     state->mf_window_len = 0;
+    state->mf_window_start = 0;
     if (state->mf_window && state->dict_parsed.content &&
         state->dict_parsed.content_size > 0) {
       size_t take = state->dict_parsed.content_size;
@@ -2590,6 +2610,7 @@ gcomp_status_t zstd_encoder_reset(gcomp_encoder_t * encoder) {
       }
       memcpy(state->mf_window, from, take);
       state->mf_window_len = take;
+      state->mf_window_start = 0;
       zstd_mf_index_range(state->match_finder, state->mf_window, 0,
           state->mf_window_len, state->mf_window_len);
       zstd_mf_note_dictionary(state->match_finder, state->allocator,

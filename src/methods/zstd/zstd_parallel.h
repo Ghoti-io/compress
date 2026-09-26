@@ -91,7 +91,7 @@ struct zstd_parallel_job_s {
   /// input_size) and may match back into the bytes before it.
   uint32_t overlap_len;
   uint8_t * mf_window;          ///< Sliding match window for this job
-  size_t mf_window_capacity;    ///< window_size + one block
+  size_t mf_window_capacity;    ///< window_size + zstd_window_slack()
   uint32_t mf_window_max;       ///< How much history the window may hold
   zstd_parallel_job_t * next_inline; ///< Next job in inline result queue
 };

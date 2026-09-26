@@ -419,6 +419,15 @@ preceding stream, so the wasted work per useful byte is `window_size / job_size`
 See [zstd's job size section](modules/zstd.md#job-size-configuration).
 `notes/compress/PERFORMANCE.md` has the sweep.
 
+The speedups above were measured at the default window. **At a large window they
+are lower than they were, and everything is faster** — the single-threaded
+encoder used to copy its whole window once per block, and removing that gained it
+more than it gained the jobs. One pattern repeated, 64 MB, at a 32 MB window: 109
+to 400 MB/s on four threads, but 126 to 1,340 on one, so four threads against one
+went from 0.87x to 0.30x. On prose at the same window, 77.4 to 116.6 MB/s and
+scaling unchanged at about 2.2x. See [what a large window
+costs](modules/zstd.md#what-a-large-window-costs).
+
 ## Existing Implementations
 
 ### Zstd Parallel Compression
