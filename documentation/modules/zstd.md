@@ -500,14 +500,33 @@ The content checksum, when enabled, covers each frame's own content.
 ### Parallel mode
 
 With `threads.count > 1` a flush submits the job in hand so its bytes go out,
-and the next input starts a new job. The jobs are blocks of one frame, so this
-moves a block seam and not a frame boundary: the output is still a single frame
-and still needs no decoder option. A flush waits for every block still out with
-the workers, which is the point — nothing the caller handed over is left in
+and the next input starts a new job. A flush waits for every block still out
+with the workers, which is the point — nothing the caller handed over is left in
 flight.
 
-(This paragraph used to say a job "is already a whole frame", which was the same
-mistake corrected under [Output format](#output-format).)
+**Both modes mean exactly what they mean single-threaded.** `GCOMP_FLUSH_SYNC`
+moves a block seam and leaves the frame open; `GCOMP_FLUSH_FULL` ends the frame
+and starts another, for the reasons above, which apply unchanged when the blocks
+were produced by workers. A flush is in fact the one place in the parallel path
+where a frame *can* be closed, because it has already waited.
+
+Until 2026-09-26 neither was true, and the two defects were opposite:
+
+- `GCOMP_FLUSH_FULL` did nothing a `GCOMP_FLUSH_SYNC` does not. The branch
+  returned before the code that ends the frame and never looked at the mode at
+  all, under a comment asserting that each job was its own frame with its own
+  window — the same belief corrected under [Output format](#output-format),
+  which had been fixed there and not here. So the recovery point the mode
+  promises was never created.
+- `GCOMP_FLUSH_SYNC` dropped history it is supposed to keep. The flush
+  allocated the next job without seeding it from the previous one's tail, which
+  `update()` does for every job it allocates. Measured on 100 KB written twice
+  with a flush between: one thread cost 50% of 2x, four threads cost 100%.
+
+Both are fixed, and the pair is why this section is worth reading twice if you
+are relying on either mode. Neither defect was visible in the output — both
+streams decoded correctly, and the only instrument that can see either is the
+ratio.
 
 ## Concatenated frames
 

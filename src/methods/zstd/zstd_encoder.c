@@ -83,6 +83,12 @@
  *   single-threaded encoder's reach.
  * - Jobs are collected in submission order (guaranteed ordering)
  * - Single-threaded mode (threads.count <= 1) produces a single frame too
+ * - Both consequences of "one frame" land on GCOMP_FLUSH_FULL, which promises
+ *   that nothing after it refers to anything before it. A flush already waits
+ *   for every worker, so it is the one point where a frame can be closed, and
+ *   it closes one: terminator, checksum, fresh header, and the overlap buffer
+ *   cleared so the next job starts cold. Until 2026-09-26 it did none of that
+ *   and FULL silently behaved as SYNC above one thread.
  *
  * ## Memory Management
  *
@@ -809,6 +815,104 @@ static gcomp_status_t zstd_encoder_update_parallel(gcomp_encoder_t * encoder,
 }
 
 /**
+ * @brief Stage the bytes that end a frame in parallel mode.
+ *
+ * Every job's blocks have Last_Block clear, because no job knows it is the
+ * last.  The frame is ended here instead, by an empty Raw block carrying the
+ * flag -- three bytes, and the same terminator the reference encoder writes
+ * for empty input.  The checksum over the whole content follows it, taken from
+ * the hash this encoder kept as it handed the input to the jobs in order.
+ *
+ * Only stages; the caller drains.  `parallel_epilogue_staged` makes it
+ * idempotent, so a caller that ran out of output can come back.
+ *
+ * Both the end of the stream and a @ref GCOMP_FLUSH_FULL part-way through it
+ * need these same bytes, which is why this is not inline in either.
+ *
+ * @param encoder Encoder, for error reporting.
+ * @param state Encoder state.
+ * @return GCOMP_OK once staged, error code on failure.
+ */
+static gcomp_status_t zstd_encoder_stage_parallel_epilogue(
+    gcomp_encoder_t * encoder, zstd_encoder_state_t * state) {
+  if (state->parallel_epilogue_staged) {
+    return GCOMP_OK;
+  }
+  size_t need = ZSTD_BLOCK_HEADER_SIZE + (state->checksum_enabled ? 4u : 0u);
+  if (need > state->parallel_output_buf_cap) {
+    gcomp_encoder_set_error(encoder, GCOMP_ERR_INTERNAL,
+        "parallel output buffer too small for the frame terminator");
+    return GCOMP_ERR_INTERNAL;
+  }
+  zstd_write_block_header(
+      state->parallel_output_buf, true, ZSTD_BLOCK_TYPE_RAW, 0);
+  size_t epi = ZSTD_BLOCK_HEADER_SIZE;
+  if (state->checksum_enabled) {
+    uint64_t hash = gcomp_xxhash64_finalize(&state->content_hash);
+    gcomp_write_le32(
+        state->parallel_output_buf + epi, (uint32_t)(hash & 0xFFFFFFFF));
+    epi += 4;
+  }
+  state->parallel_output_buf_pos = 0;
+  state->parallel_output_buf_len = epi;
+  state->parallel_epilogue_staged = true;
+  return GCOMP_OK;
+}
+
+/**
+ * @brief Start a fresh frame in parallel mode, after one has been ended.
+ *
+ * The mirror of @ref zstd_encoder_rearm_frame for the parallel path, and it
+ * has the same job: leave nothing of the frame just closed behind.  Three
+ * kinds of history have to go, and the parallel path's own kind is the one
+ * that is easy to miss -- `parallel_overlap_buf` holds the tail of the last
+ * job submitted and is copied to the front of the next one, so a frame that
+ * kept it would open with matches into bytes the decoder has been told to
+ * forget.  The reset path makes the same three moves for the same reason.
+ *
+ * Frame_Content_Size is dropped for the reason @ref zstd_encoder_rearm_frame
+ * gives: it describes the frame it appears in (RFC 8878 3.1.1.1.2), and the
+ * caller's figure was for the whole content.
+ *
+ * The new header is staged rather than emitted, exactly as at create time, so
+ * it goes out with whatever the caller writes next.
+ *
+ * @param state Encoder state.
+ * @return GCOMP_OK on success, error code if the header cannot be written.
+ */
+static gcomp_status_t zstd_encoder_rearm_parallel_frame(
+    zstd_encoder_state_t * state) {
+  state->parallel_epilogue_staged = false;
+  state->blocks_finished = false;
+
+  // The content checksum covers one frame's content, so the next frame's
+  // starts from nothing.
+  if (state->checksum_enabled) {
+    gcomp_xxhash64_reset(&state->content_hash, 0);
+  }
+
+  // The history the jobs actually see.  Without this the next job opens with
+  // the previous frame's tail in front of it and matches into it freely, which
+  // is what GCOMP_FLUSH_FULL exists to prevent.
+  state->parallel_overlap_len = 0;
+  zstd_encoder_seed_parallel_job(state);
+
+  state->header.content_size_present = false;
+  state->header.content_size = 0;
+
+  gcomp_status_t status = zstd_write_frame_header(&state->header,
+      state->parallel_output_buf, state->parallel_output_buf_cap,
+      &state->header_len);
+  if (status != GCOMP_OK) {
+    return status;
+  }
+  state->parallel_output_buf_pos = 0;
+  state->parallel_output_buf_len = state->header_len;
+  state->stage = ZSTD_ENC_STAGE_BLOCKS;
+  return GCOMP_OK;
+}
+
+/**
  * @brief Finish parallel encoding.
  *
  * Submits final partial job and collects all remaining results.
@@ -882,31 +986,10 @@ static gcomp_status_t zstd_encoder_finish_parallel(gcomp_encoder_t * encoder,
     return GCOMP_ERR_LIMIT;
   }
 
-  // Every job's blocks are out, and all of them have Last_Block clear because
-  // no job knows it is the last.  The frame is ended here instead, by an empty
-  // Raw block carrying the flag -- three bytes, and the same terminator the
-  // reference encoder writes for empty input.  The checksum over the whole
-  // content follows it, taken from the hash this encoder kept as it handed the
-  // input to the jobs in order.
-  if (!state->parallel_epilogue_staged) {
-    size_t need = ZSTD_BLOCK_HEADER_SIZE + (state->checksum_enabled ? 4u : 0u);
-    if (need > state->parallel_output_buf_cap) {
-      gcomp_encoder_set_error(encoder, GCOMP_ERR_INTERNAL,
-          "parallel output buffer too small for the frame terminator");
-      return GCOMP_ERR_INTERNAL;
-    }
-    zstd_write_block_header(
-        state->parallel_output_buf, true, ZSTD_BLOCK_TYPE_RAW, 0);
-    size_t epi = ZSTD_BLOCK_HEADER_SIZE;
-    if (state->checksum_enabled) {
-      uint64_t hash = gcomp_xxhash64_finalize(&state->content_hash);
-      gcomp_write_le32(
-          state->parallel_output_buf + epi, (uint32_t)(hash & 0xFFFFFFFF));
-      epi += 4;
-    }
-    state->parallel_output_buf_pos = 0;
-    state->parallel_output_buf_len = epi;
-    state->parallel_epilogue_staged = true;
+  gcomp_status_t epi_status =
+      zstd_encoder_stage_parallel_epilogue(encoder, state);
+  if (epi_status != GCOMP_OK) {
+    return epi_status;
   }
 
   if (!zstd_encoder_drain_parallel_output(state, output)) {
@@ -1780,6 +1863,14 @@ static void zstd_encoder_drop_history(zstd_encoder_state_t * state) {
   state->rep_offset_2 = ZSTD_REP_OFFSET_2_INIT;
   state->rep_offset_3 = ZSTD_REP_OFFSET_3_INIT;
 
+  // There are two spellings of history in this encoder and dropping only one
+  // of them is how GCOMP_FLUSH_FULL came to be a no-op in parallel mode: the
+  // match finder below is the single-threaded path's, and the overlap buffer
+  // is the parallel path's.  This function is named for all of it.  The
+  // parallel flush calls zstd_encoder_rearm_parallel_frame(), which reseeds
+  // the job in hand from the cleared buffer; here there is no job to reseed.
+  state->parallel_overlap_len = 0;
+
   if (state->match_finder) {
     zstd_mf_reset(state->match_finder);
   }
@@ -1995,6 +2086,15 @@ gcomp_status_t zstd_encoder_flush(gcomp_encoder_t * encoder,
         return gcomp_encoder_set_error(
             encoder, status, "failed to allocate parallel job");
       }
+
+      // The job the flush just handed over saved its tail; the new one has to
+      // be given it, or the bytes after the flush start cold.  update() seeds
+      // every job it allocates and this path did not, which made a SYNC flush
+      // lose the history it exists to keep: measured on 100 KB written twice
+      // with a flush between, threads.count 4 cost 100% of 2x where one thread
+      // cost 50%.  A GCOMP_FLUSH_FULL below clears the overlap again, on
+      // purpose; the two are not the same call any more.
+      zstd_encoder_seed_parallel_job(state);
     }
 
     // A flush has to wait: its whole point is that nothing the caller handed
@@ -2015,8 +2115,43 @@ gcomp_status_t zstd_encoder_flush(gcomp_encoder_t * encoder,
       return GCOMP_ERR_LIMIT; // Jobs remain; call again once drained.
     }
 
-    // Each job is its own frame with its own window, so there is no history
-    // spanning the flush for GCOMP_FLUSH_FULL to drop.
+    if (mode != GCOMP_FLUSH_FULL) {
+      return GCOMP_OK;
+    }
+
+    // Everything above has drained, submitted, waited and collected, so no
+    // worker holds anything and this is the one point in the parallel path
+    // where a frame can be closed.  It has to be closed, for the same reason
+    // the single-threaded path closes one: the jobs are blocks of a single
+    // frame -- measured, see the note on parallel mode in the file header --
+    // so without this the next job's blocks continue the frame the caller
+    // asked to be able to recover from, and the overlap hands them the bytes
+    // before the flush to match into.
+    //
+    // This comment used to say the opposite, that each job was its own frame
+    // with its own window and there was therefore no history for
+    // GCOMP_FLUSH_FULL to drop, and the code trusted it: FULL did exactly
+    // what SYNC does whenever threads.count was above one. That belief is the
+    // same one the file header records as measured and wrong; the correction
+    // reached the header and not this branch.
+    gcomp_status_t epi_status =
+        zstd_encoder_stage_parallel_epilogue(encoder, state);
+    if (epi_status != GCOMP_OK) {
+      return gcomp_encoder_set_error(
+          encoder, epi_status, "parallel frame terminator failed");
+    }
+    if (!zstd_encoder_drain_parallel_output(state, output)) {
+      return GCOMP_ERR_LIMIT; // Terminator did not fit; call flush again.
+    }
+
+    // Only now is the frame really over, so only now may the next one be set
+    // up.  Staging the new header before the terminator has left would put
+    // the two in the buffer in the wrong order.
+    status = zstd_encoder_rearm_parallel_frame(state);
+    if (status != GCOMP_OK) {
+      return gcomp_encoder_set_error(
+          encoder, status, "failed to start a new parallel frame");
+    }
     return GCOMP_OK;
   }
 

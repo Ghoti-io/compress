@@ -130,11 +130,13 @@ with deflate — seven times the input. The API will let you do it; do not.
 
 Two consequences worth knowing before you rely on them:
 
-- **zstd's full flush ends the frame.** Repeat offsets are frame-level state
-  that the decoder tracks in step with the encoder, so an encoder cannot reset
-  them mid-frame; the unit of recovery in zstd is the frame. libzstd draws the
-  same line — it offers `ZSTD_e_flush` and `ZSTD_e_end` and nothing in
-  between. Such a stream decodes fully by default.
+- **zstd's full flush ends the frame**, at every `threads.count`. Repeat
+  offsets are frame-level state that the decoder tracks in step with the
+  encoder, so an encoder cannot reset them mid-frame; the unit of recovery in
+  zstd is the frame. libzstd draws the same line — it offers `ZSTD_e_flush` and
+  `ZSTD_e_end` and nothing in between. Such a stream decodes fully by default.
+  Before 2026-09-26 the parallel encoder did none of this and `FULL` was
+  silently a `SYNC`; see [zstd](../modules/zstd.md#parallel-mode).
 - **LZW's flush is not byte-aligned.** Codes are 9–12 bits and the partial byte
   stays in the encoder to be continued. The data promise still holds; the
   byte-boundary one does not. If you need aligned boundaries, use a framed

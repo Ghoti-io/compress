@@ -1413,11 +1413,13 @@ TEST_F(ZstdOracleTest, OurEncoder_ZstdCli_ParallelMatchesSingleThreaded) {
 
     // And our own decoder must agree with the reference about it.
     //
-    // zstd.concat is required here and that is by design, not an oversight:
-    // the parallel encoder emits one frame per job, and this library's decoder
-    // stops after the first frame unless told otherwise (documented in
-    // documentation/modules/zstd.md, and asserted by
-    // ZstdConcatTest.TwoFramesConcatDisabled).
+    // zstd.concat is set here but is not what makes this pass: the parallel
+    // encoder emits ONE frame, so there is nothing to concatenate. The reason
+    // given here used to be "the parallel encoder emits one frame per job",
+    // which is the stale belief corrected in zstd_encoder.c's file header --
+    // and, until 2026-09-26, still trusted by the flush path, where it cost
+    // GCOMP_FLUSH_FULL its whole meaning above one thread. Left set because it
+    // is harmless and because a FULL flush would make it load-bearing.
     std::vector<uint8_t> ours = gcompDecompressOpts(
         compressed, original.size(), [](gcomp_options_t * o) {
           return gcomp_options_set_bool(o, "zstd.concat", 1) == GCOMP_OK;
@@ -1426,6 +1428,95 @@ TEST_F(ZstdOracleTest, OurEncoder_ZstdCli_ParallelMatchesSingleThreaded) {
         << "threads=" << c.threads << " job_size=" << c.job_size;
     EXPECT_EQ(memcmp(ours.data(), original.data(), original.size()), 0)
         << "threads=" << c.threads << " job_size=" << c.job_size;
+  }
+}
+
+/**
+ * The reference reads what a flush produced, at every thread count and in both
+ * modes.
+ *
+ * Nothing in this file asked that before: `grep -c flush` over it was zero, so
+ * no outside implementation had ever read a stream that a
+ * gcomp_encoder_flush() helped build.  That is the gap worth closing on its
+ * own, and GCOMP_FLUSH_FULL in parallel mode makes it urgent -- it emits a
+ * shape the parallel encoder never emitted before, several frames where there
+ * used to be one, and our own decoder agreeing with our own encoder about a
+ * new shape is not evidence.
+ *
+ * The zstd CLI decodes concatenated frames without being asked, so the same
+ * invocation checks both modes.
+ */
+TEST_F(ZstdOracleTest, OurEncoder_ZstdCli_FlushedStreamsAtEveryThreadCount) {
+  if (!has_zstd_cli_) {
+    GTEST_SKIP() << "zstd CLI not available";
+  }
+
+  // Past the 64 KB minimum job size several times over, so a flush lands with
+  // real work both behind and ahead of it.
+  std::vector<uint8_t> original = generateProseLikeData(512 * 1024, 53u);
+
+  for (uint64_t threads : {(uint64_t)1, (uint64_t)2, (uint64_t)4}) {
+    for (gcomp_flush_t mode : {GCOMP_FLUSH_SYNC, GCOMP_FLUSH_FULL}) {
+      const char * mode_name =
+          (mode == GCOMP_FLUSH_SYNC) ? "sync" : "full";
+
+      gcomp_options_t * opts = nullptr;
+      ASSERT_EQ(gcomp_options_create(&opts), GCOMP_OK);
+      ASSERT_EQ(
+          gcomp_options_set_uint64(opts, "threads.count", threads), GCOMP_OK);
+      gcomp_encoder_t * enc = nullptr;
+      ASSERT_EQ(gcomp_encoder_create(registry_, "zstd", opts, &enc), GCOMP_OK);
+      gcomp_options_destroy(opts);
+
+      std::vector<uint8_t> compressed;
+      uint8_t window[16384];
+      const size_t piece = 100 * 1024;
+      size_t consumed = 0;
+      while (consumed < original.size()) {
+        const size_t take = std::min(piece, original.size() - consumed);
+        gcomp_buffer_t in = {
+            const_cast<uint8_t *>(original.data() + consumed), take, 0};
+        while (in.used < in.size) {
+          gcomp_buffer_t out = {window, sizeof(window), 0};
+          ASSERT_EQ(gcomp_encoder_update(enc, &in, &out), GCOMP_OK)
+              << "threads=" << threads << " mode=" << mode_name;
+          compressed.insert(compressed.end(), window, window + out.used);
+        }
+        consumed += take;
+
+        // A flush after every piece, including the last one before finish().
+        for (;;) {
+          gcomp_buffer_t out = {window, sizeof(window), 0};
+          gcomp_status_t st = gcomp_encoder_flush(enc, &out, mode);
+          compressed.insert(compressed.end(), window, window + out.used);
+          if (st == GCOMP_OK) {
+            break;
+          }
+          ASSERT_EQ(st, GCOMP_ERR_LIMIT)
+              << "threads=" << threads << " mode=" << mode_name;
+        }
+      }
+      for (;;) {
+        gcomp_buffer_t out = {window, sizeof(window), 0};
+        gcomp_status_t st = gcomp_encoder_finish(enc, &out);
+        compressed.insert(compressed.end(), window, window + out.used);
+        if (st == GCOMP_OK) {
+          break;
+        }
+        ASSERT_EQ(st, GCOMP_ERR_LIMIT)
+            << "threads=" << threads << " mode=" << mode_name;
+      }
+      gcomp_encoder_destroy(enc);
+      ASSERT_FALSE(compressed.empty())
+          << "threads=" << threads << " mode=" << mode_name;
+
+      std::vector<uint8_t> out = zstdCliDecompress(compressed);
+      ASSERT_EQ(out.size(), original.size())
+          << "threads=" << threads << " mode=" << mode_name
+          << ": the zstd CLI could not read what our flush produced";
+      EXPECT_EQ(memcmp(out.data(), original.data(), original.size()), 0)
+          << "threads=" << threads << " mode=" << mode_name;
+    }
   }
 }
 

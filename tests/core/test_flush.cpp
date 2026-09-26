@@ -590,6 +590,208 @@ TEST_F(FlushTest, ZstdFullFlushEndsTheFrame) {
   gcomp_options_destroy(dopts);
 }
 
+/**
+ * Incompressible bytes, then a flush, then exactly the same bytes again.
+ *
+ * This is the sharpest instrument there is for GCOMP_FLUSH_FULL, because the
+ * only compression available is the match against the copy: history kept costs
+ * about half of 2x, history dropped costs all of it.  Repetitive text would
+ * blur that into a few percent.
+ *
+ * ## Why this had to be a ratio and not a comparison of bytes
+ *
+ * Every other flush test here asserts that the bytes come back, and they do --
+ * a stream whose FULL flush kept its history is still perfectly well-formed and
+ * still decodes to the input.  What FULL adds is a property about what the
+ * encoder *did not do*, and nothing that reads the output can see it.  That is
+ * why parallel mode ignored the mode for as long as it did.
+ */
+TEST_F(FlushTest, ZstdFullFlushDropsTheHistoryAtEveryThreadCount) {
+  // Noise, so nothing in the half compresses on its own.
+  //
+  // 100 KB, not more: the match finder's reach for a single match of this shape
+  // runs out somewhere between 100 KB and 300 KB, and at 300 KB even one thread
+  // fails to match the copy -- which would disarm the control below and leave
+  // the assertion after it proving nothing.  Measured, not chosen.
+  std::vector<uint8_t> half(100000);
+  unsigned state = 20260926u;
+  for (auto & b : half) {
+    state = state * 1103515245u + 12345u;
+    b = (uint8_t)(state >> 16);
+  }
+  std::vector<uint8_t> data(half);
+  data.insert(data.end(), half.begin(), half.end());
+
+  auto encode = [&](uint64_t threads, gcomp_flush_t mode) {
+    gcomp_options_t * eopts = nullptr;
+    EXPECT_EQ(gcomp_options_create(&eopts), GCOMP_OK);
+    EXPECT_EQ(
+        gcomp_options_set_uint64(eopts, "threads.count", threads), GCOMP_OK);
+    gcomp_encoder_t * encoder = nullptr;
+    EXPECT_EQ(
+        gcomp_encoder_create(registry_, "zstd", eopts, &encoder), GCOMP_OK);
+    gcomp_options_destroy(eopts);
+    if (!encoder) {
+      return (size_t)0;
+    }
+
+    std::vector<uint8_t> stream;
+    PushAll(encoder, data.data(), half.size(), stream);
+    FlushAll(encoder, mode, stream);
+    PushAll(encoder, data.data() + half.size(), half.size(), stream);
+    FinishAll(encoder, stream);
+    gcomp_encoder_destroy(encoder);
+
+    // A full flush ends the frame in both modes now, so both need concat.
+    gcomp_options_t * dopts = DecoderOptionsFor("zstd", mode);
+    EXPECT_EQ(DecodeWhole("zstd", dopts, stream, data.size()), data)
+        << "threads=" << threads << " mode=" << (int)mode;
+    if (dopts) {
+      gcomp_options_destroy(dopts);
+    }
+    return stream.size();
+  };
+
+  const size_t twice = data.size();
+  for (uint64_t threads : {(uint64_t)1, (uint64_t)4}) {
+    size_t kept = encode(threads, GCOMP_FLUSH_SYNC);
+    size_t dropped = encode(threads, GCOMP_FLUSH_FULL);
+
+    // The control. A sync flush must still let the second half match the
+    // first, so it comes in near half of 2x. If this ever fails the subject
+    // stopped being compressible and the assertion below proves nothing.
+    EXPECT_LT(kept, twice * 3 / 4)
+        << "threads=" << threads
+        << ": a sync flush should keep the history, so the copy should still "
+           "match and the output should be far below 2x";
+
+    // The property. Nothing after the flush may refer to anything before it,
+    // so the copy has to be described again from scratch.
+    EXPECT_GT(dropped, twice * 9 / 10)
+        << "threads=" << threads
+        << ": a full flush dropped nothing -- the second half still matched "
+           "into the first";
+    EXPECT_GT(dropped, kept) << "threads=" << threads;
+  }
+}
+
+/**
+ * The frame really is ended in parallel mode, not merely emptied of history.
+ * Both halves of FULL matter: the history is what the promise is about, and the
+ * frame boundary is what makes one API call mean one thing at any thread count.
+ */
+TEST_F(FlushTest, ZstdFullFlushEndsTheFrameInParallelMode) {
+  const std::vector<uint8_t> data = MakeMixedData(400000);
+
+  gcomp_options_t * eopts = nullptr;
+  ASSERT_EQ(gcomp_options_create(&eopts), GCOMP_OK);
+  ASSERT_EQ(gcomp_options_set_uint64(eopts, "threads.count", 4), GCOMP_OK);
+  gcomp_encoder_t * encoder = nullptr;
+  ASSERT_EQ(gcomp_encoder_create(registry_, "zstd", eopts, &encoder), GCOMP_OK);
+  gcomp_options_destroy(eopts);
+
+  std::vector<uint8_t> stream;
+  PushAll(encoder, data.data(), data.size() / 2, stream);
+  FlushAll(encoder, GCOMP_FLUSH_FULL, stream);
+  const size_t first_frame_len = stream.size();
+  PushAll(encoder, data.data() + data.size() / 2,
+      data.size() - data.size() / 2, stream);
+  FinishAll(encoder, stream);
+  gcomp_encoder_destroy(encoder);
+
+  // The new header is staged by the flush and emitted by the next write, the
+  // same way the first frame's header is staged at create time -- so the magic
+  // lands at exactly the end of the closed frame.
+  ASSERT_GT(stream.size(), first_frame_len + 4);
+  EXPECT_EQ(stream[first_frame_len + 0], 0x28);
+  EXPECT_EQ(stream[first_frame_len + 1], 0xB5);
+  EXPECT_EQ(stream[first_frame_len + 2], 0x2F);
+  EXPECT_EQ(stream[first_frame_len + 3], 0xFD);
+
+  gcomp_options_t * dopts = nullptr;
+  ASSERT_EQ(gcomp_options_create(&dopts), GCOMP_OK);
+  ASSERT_EQ(gcomp_options_set_bool(dopts, "zstd.concat", 1), GCOMP_OK);
+  EXPECT_EQ(DecodeWhole("zstd", dopts, stream, data.size()), data);
+  gcomp_options_destroy(dopts);
+}
+
+/**
+ * A parallel full flush stages a terminator, a checksum and a fresh header, and
+ * any of them can run out of output part-way.  Two bytes at a time forces every
+ * one of those boundaries to be resumed.
+ *
+ * This is the half of the change that was reasoned rather than measured when it
+ * was written, which is the reason for the test: on re-entry the flush runs the
+ * whole submit-and-wait path again before reaching the epilogue, and it has to
+ * come to the same conclusion the second time.
+ */
+TEST_F(FlushTest, ZstdParallelFullFlushResumesThroughATinyOutputBuffer) {
+  const std::vector<uint8_t> data = MakeMixedData(200000);
+
+  gcomp_options_t * eopts = nullptr;
+  ASSERT_EQ(gcomp_options_create(&eopts), GCOMP_OK);
+  ASSERT_EQ(gcomp_options_set_uint64(eopts, "threads.count", 4), GCOMP_OK);
+  ASSERT_EQ(gcomp_options_set_bool(eopts, "zstd.checksum", 1), GCOMP_OK);
+  gcomp_encoder_t * encoder = nullptr;
+  ASSERT_EQ(gcomp_encoder_create(registry_, "zstd", eopts, &encoder), GCOMP_OK);
+  gcomp_options_destroy(eopts);
+
+  std::vector<uint8_t> stream;
+  PushAll(encoder, data.data(), data.size() / 2, stream);
+  FlushAll(encoder, GCOMP_FLUSH_FULL, stream, /*out_chunk=*/2);
+  PushAll(encoder, data.data() + data.size() / 2,
+      data.size() - data.size() / 2, stream);
+  FinishAll(encoder, stream);
+  gcomp_encoder_destroy(encoder);
+
+  gcomp_options_t * dopts = nullptr;
+  ASSERT_EQ(gcomp_options_create(&dopts), GCOMP_OK);
+  ASSERT_EQ(gcomp_options_set_bool(dopts, "zstd.concat", 1), GCOMP_OK);
+  EXPECT_EQ(DecodeWhole("zstd", dopts, stream, data.size()), data);
+  gcomp_options_destroy(dopts);
+}
+
+/**
+ * Two full flushes in a row, with nothing between them, must behave the same at
+ * either thread count: the second closes an empty frame rather than erroring or
+ * quietly doing nothing.  It is also what proves the epilogue flag is cleared,
+ * since a stale one would make the second flush emit no terminator at all.
+ */
+TEST_F(FlushTest, ZstdBackToBackFullFlushesAgreeAcrossThreadCounts) {
+  const std::vector<uint8_t> data = MakeMixedData(150000);
+
+  auto encode = [&](uint64_t threads) {
+    gcomp_options_t * eopts = nullptr;
+    EXPECT_EQ(gcomp_options_create(&eopts), GCOMP_OK);
+    EXPECT_EQ(
+        gcomp_options_set_uint64(eopts, "threads.count", threads), GCOMP_OK);
+    gcomp_encoder_t * encoder = nullptr;
+    EXPECT_EQ(
+        gcomp_encoder_create(registry_, "zstd", eopts, &encoder), GCOMP_OK);
+    gcomp_options_destroy(eopts);
+    if (!encoder) {
+      return (size_t)0;
+    }
+    std::vector<uint8_t> stream;
+    PushAll(encoder, data.data(), data.size(), stream);
+    FlushAll(encoder, GCOMP_FLUSH_FULL, stream);
+    FlushAll(encoder, GCOMP_FLUSH_FULL, stream);
+    FinishAll(encoder, stream);
+    gcomp_encoder_destroy(encoder);
+
+    gcomp_options_t * dopts = nullptr;
+    EXPECT_EQ(gcomp_options_create(&dopts), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_bool(dopts, "zstd.concat", 1), GCOMP_OK);
+    EXPECT_EQ(DecodeWhole("zstd", dopts, stream, data.size()), data)
+        << "threads=" << threads;
+    gcomp_options_destroy(dopts);
+    return stream.size();
+  };
+
+  EXPECT_GT(encode(1), 0u);
+  EXPECT_GT(encode(4), 0u);
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
