@@ -57,6 +57,7 @@
 #include "../../autoreg/autoreg_platform.h"
 #include "../../core/stream_internal.h"
 #include "../../core/bound_internal.h"
+#include "../../core/seek_table.h"
 #include <ghoti.io/compress/compress.h>
 #include <string.h>
 #include "zstd_internal.h"
@@ -631,13 +632,64 @@ static gcomp_status_t zstd_encode_bound(
     return GCOMP_ERR_LIMIT;
   }
 
+  // Seekable mode writes many frames and a seek table, so the single-frame
+  // arithmetic below is not a bound for it.  This used to be missing entirely -
+  // the option was never read here - and the figure came out byte-identical
+  // whether it was set or not.  With compressible input the slack hid it; with
+  // incompressible input the documented pattern (bound, malloc, encode into
+  // exactly that) returned GCOMP_ERR_LIMIT at every size measured: 300,000
+  // bytes wanted 300,048 against a bound of 300,030, and 2,160,000 wanted
+  // 2,160,137 against 2,160,072.
+  //
+  // Each frame is a complete one-shot stream, so each owes its own header and
+  // its own content checksum; the table owes one entry per frame plus eight
+  // bytes of skippable-frame header and the footer.
+  uint64_t seekable_frame_size = 1048576u;
+  int seekable = 0;
+  int seekable_checksum = 1;
+  if (options) {
+    gcomp_options_get_bool(options, "zstd.seekable", &seekable);
+    gcomp_options_get_uint64(
+        options, "zstd.seekable_frame_size", &seekable_frame_size);
+    gcomp_options_get_bool(
+        options, "zstd.seekable_checksum", &seekable_checksum);
+  }
+  size_t frames = 1u;
+  if (seekable) {
+    if (seekable_frame_size == 0u) {
+      return GCOMP_ERR_INVALID_ARG;
+    }
+    size_t frame_span = (seekable_frame_size > (uint64_t)SIZE_MAX)
+        ? SIZE_MAX
+        : (size_t)seekable_frame_size;
+    s = gcomp_bound_block_count(input_size, frame_span, &frames);
+    if (s != GCOMP_OK) {
+      return s;
+    }
+    if (frames == 0u) {
+      frames = 1u; // Empty input still writes one frame and a table.
+    }
+    // Every frame's last block is its own, so the per-frame "+1" the
+    // single-frame path adds has to be paid once per frame rather than once.
+    if (!gcu_safe_add_size(blocks, frames, &blocks)) {
+      return GCOMP_ERR_LIMIT;
+    }
+  }
+
   size_t bound = input_size;
-  s = gcomp_bound_add(&bound, 18u); // Magic_Number + Frame_Header, maximum
+  // Magic_Number + Frame_Header, maximum, once per frame.
+  s = gcomp_bound_add_mul(&bound, frames, 18u);
   if (s == GCOMP_OK) {
     s = gcomp_bound_add_mul(&bound, blocks, ZSTD_BLOCK_HEADER_SIZE);
   }
   if (s == GCOMP_OK && checksum) {
-    s = gcomp_bound_add(&bound, 4u);
+    s = gcomp_bound_add_mul(&bound, frames, 4u);
+  }
+  if (s == GCOMP_OK && seekable) {
+    s = gcomp_bound_add_mul(&bound, frames, seekable_checksum ? 12u : 8u);
+    if (s == GCOMP_OK) {
+      s = gcomp_bound_add(&bound, 8u + GCOMP_SEEK_FOOTER_SIZE);
+    }
   }
   if (s != GCOMP_OK) {
     return s;

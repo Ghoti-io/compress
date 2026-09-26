@@ -429,6 +429,105 @@ TEST(EncodeBound, Threaded) {
 }
 
 /**
+ * @brief zstd.seekable writes many frames, and the bound has to know that.
+ *
+ * `EncodeBound.Threaded` is the same idea one option over, and this is the cell
+ * neither it nor the seekable tests covered: the bound was computed for a single
+ * frame and never read `zstd.seekable` at all, so it came out byte-identical
+ * whether the option was set or not. Seekable writes one complete frame per
+ * `zstd.seekable_frame_size` of input, each owing its own header and checksum,
+ * plus a seek table with an entry per frame.
+ *
+ * With compressible input the single-frame slack absorbed the difference, which
+ * is why nothing noticed. With incompressible input the documented pattern -
+ * ask for the bound, allocate exactly that, encode - returned GCOMP_ERR_LIMIT at
+ * every size tried: 300,000 bytes wanted 300,048 against a bound of 300,030, and
+ * 2,160,000 wanted 2,160,137 against 2,160,072.
+ *
+ * The frame sizes below straddle the default 1 MiB frame span so the count is 1,
+ * 2 and 3, because an overhead counted once instead of per frame is invisible
+ * when there is only one frame.
+ */
+TEST(EncodeBound, ZstdSeekableCountsEveryFrame) {
+  for (int checksum = 0; checksum < 2; checksum++) {
+    for (int seek_checksum = 0; seek_checksum < 2; seek_checksum++) {
+      for (size_t n : {300000u, 1000000u, 1100000u, 2160000u}) {
+        gcomp_options_t * o = nullptr;
+        ASSERT_EQ(gcomp_options_create(&o), GCOMP_OK);
+        ASSERT_EQ(gcomp_options_set_bool(o, "zstd.seekable", 1), GCOMP_OK);
+        ASSERT_EQ(gcomp_options_set_bool(o, "zstd.checksum", checksum),
+            GCOMP_OK);
+        ASSERT_EQ(
+            gcomp_options_set_bool(o, "zstd.seekable_checksum", seek_checksum),
+            GCOMP_OK);
+
+        size_t bound = 0;
+        ASSERT_EQ(gcomp_encode_bound(nullptr, "zstd", o, n, &bound), GCOMP_OK);
+
+        const std::vector<uint8_t> input = incompressible(n);
+        std::vector<uint8_t> out(bound ? bound : 1);
+        size_t written = 0;
+        const gcomp_status_t s = gcomp_encode_buffer(nullptr, "zstd", o,
+            input.data(), input.size(), out.data(), out.size(), &written);
+        EXPECT_EQ(s, GCOMP_OK)
+            << "n=" << n << " checksum=" << checksum
+            << " seekable_checksum=" << seek_checksum
+            << ": encoding into exactly the bound (" << bound << ") returned "
+            << gcomp_status_to_string(s);
+        EXPECT_LE(written, bound)
+            << "n=" << n << " checksum=" << checksum
+            << " seekable_checksum=" << seek_checksum;
+        gcomp_options_destroy(o);
+      }
+    }
+  }
+}
+
+/**
+ * @brief A seekable bound must exceed the same input's single-frame bound.
+ *
+ * The sweep above would pass if the bound were simply enormous. This is the
+ * cheap statement of what makes it right: more frames cost more, so asking for
+ * a seekable file must produce a larger figure than asking for one frame, and
+ * asking for smaller frames must produce a larger figure still.
+ *
+ * It is also the assertion that fails if somebody stops reading the option
+ * again, which is the actual regression to guard - the arithmetic was correct
+ * for one frame all along.
+ */
+TEST(EncodeBound, ZstdSeekableBoundGrowsWithTheFrameCount) {
+  const size_t n = 4000000;
+
+  size_t plain = 0;
+  {
+    gcomp_options_t * o = nullptr;
+    ASSERT_EQ(gcomp_options_create(&o), GCOMP_OK);
+    ASSERT_EQ(gcomp_encode_bound(nullptr, "zstd", o, n, &plain), GCOMP_OK);
+    gcomp_options_destroy(o);
+  }
+
+  size_t previous = plain;
+  // Smaller frames, so more of them: each step must cost more than the last.
+  for (uint64_t frame : {(uint64_t)2097152, (uint64_t)1048576,
+           (uint64_t)262144, (uint64_t)65536}) {
+    gcomp_options_t * o = nullptr;
+    ASSERT_EQ(gcomp_options_create(&o), GCOMP_OK);
+    ASSERT_EQ(gcomp_options_set_bool(o, "zstd.seekable", 1), GCOMP_OK);
+    ASSERT_EQ(
+        gcomp_options_set_uint64(o, "zstd.seekable_frame_size", frame),
+        GCOMP_OK);
+    size_t bound = 0;
+    ASSERT_EQ(gcomp_encode_bound(nullptr, "zstd", o, n, &bound), GCOMP_OK);
+    gcomp_options_destroy(o);
+
+    EXPECT_GT(bound, previous)
+        << "frame_size=" << frame << ": " << bound << " is not more than "
+        << previous << ", so the frame count is not reaching the bound";
+    previous = bound;
+  }
+}
+
+/**
  * @brief The bound must be close to what the worst input actually produces.
  *
  * Otherwise the sweep above proves only that the bound is large, not that it is

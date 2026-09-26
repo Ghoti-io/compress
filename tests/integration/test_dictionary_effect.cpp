@@ -51,6 +51,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <algorithm>
 #include <vector>
 
 namespace {
@@ -331,6 +332,231 @@ TEST(DictionaryEffect, ZstdKeepsTheDictionaryAcrossAParallelFullFlush) {
         << "threads=" << threads << ": " << with
         << " bytes with a dictionary across a full flush against " << without
         << " without - the flush dropped the dictionary along with the stream";
+  }
+}
+
+
+/**
+ * @brief Every option that alters the match finder, in combination.
+ *
+ * The dictionary defect this file exists for was found in a cell nobody had
+ * measured: dictionary tests passed no thread count and parallel tests passed no
+ * dictionary, so each axis was covered alone and their product was not. This is
+ * the rest of that grid - `zstd.dictionary`, `zstd.long` and `zstd.seekable`
+ * against each other and against `threads.count` - asserted the only way an
+ * ignored option can be seen, by whether the output actually gets smaller.
+ *
+ * ## Two things the grid taught, both of which are the test's own setup
+ *
+ * `zstd.long` cannot help unless the window permits the distance. At the default
+ * level `zstd_level_to_window_log(3)` is 17, a 128 KiB window, so a match two
+ * megabytes back is not merely unfound but illegal (RFC 8878 3.1.1.1.2). A first
+ * version of this placed a repeat at 2 MB, left the window at its default, and
+ * read the resulting zero as `zstd.long` being broken in combination. The window
+ * is explicit here, and the repeat is beyond MF_MAX_DISTANCE so only the long
+ * matcher can reach it - the same constraint test_zstd_ldm.cpp states.
+ *
+ * `zstd.seekable` with `threads.count > 1` is refused, deliberately
+ * (GCOMP_ERR_UNSUPPORTED, because the frame boundaries would come from
+ * `zstd.job_size` rather than `zstd.seekable_frame_size`). The grid asserts the
+ * refusal rather than skipping the cell, so that it stays a decision.
+ */
+TEST(DictionaryEffect, EveryMatchFinderOptionComposes) {
+  const std::vector<uint8_t> dict = distinct_prefixes(65536, 4242);
+  // The dictionary repeated, so a dictionary can show itself, and long enough
+  // to span several seekable frames and several parallel jobs.
+  std::vector<uint8_t> payload;
+  for (int i = 0; i < 24; i++) {
+    payload.insert(payload.end(), dict.begin(), dict.end());
+  }
+
+  struct Cell {
+    uint64_t threads;
+    bool seekable;
+    bool longmode;
+  };
+  const std::vector<Cell> cells = {
+      {1, false, false}, {1, false, true}, {1, true, false}, {1, true, true},
+      {4, false, false}, {4, false, true},
+  };
+
+  auto encode = [&](const Cell & c, bool with_dict, gcomp_status_t * status) {
+    gcomp_options_t * o = nullptr;
+    EXPECT_EQ(gcomp_options_create(&o), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_uint64(o, "threads.count", c.threads),
+        GCOMP_OK);
+    if (c.seekable) {
+      EXPECT_EQ(gcomp_options_set_bool(o, "zstd.seekable", 1), GCOMP_OK);
+    }
+    if (c.longmode) {
+      EXPECT_EQ(gcomp_options_set_bool(o, "zstd.long", 1), GCOMP_OK);
+      EXPECT_EQ(gcomp_options_set_uint64(o, "zstd.window_log", 25), GCOMP_OK);
+    }
+    if (with_dict) {
+      EXPECT_EQ(gcomp_options_set_bytes(
+                    o, "zstd.dictionary", dict.data(), dict.size()),
+          GCOMP_OK);
+    }
+    size_t bound = 0;
+    EXPECT_EQ(
+        gcomp_encode_bound(nullptr, "zstd", o, payload.size(), &bound),
+        GCOMP_OK);
+    std::vector<uint8_t> out(bound ? bound : 1);
+    size_t w = 0;
+    *status = gcomp_encode_buffer(nullptr, "zstd", o, payload.data(),
+        payload.size(), out.data(), out.size(), &w);
+    if (*status == GCOMP_OK) {
+      // Whatever the combination, it has to read back.
+      EXPECT_EQ(gcomp_options_set_bool(o, "zstd.concat", 1), GCOMP_OK);
+      EXPECT_EQ(gcomp_options_set_uint64(o, "limits.max_expansion_ratio", 0),
+          GCOMP_OK);
+      std::vector<uint8_t> back(payload.size() + 65536);
+      size_t got = 0;
+      EXPECT_EQ(gcomp_decode_buffer(nullptr, "zstd", o, out.data(), w,
+                    back.data(), back.size(), &got),
+          GCOMP_OK);
+      EXPECT_EQ(got, payload.size());
+      if (got == payload.size()) {
+        EXPECT_EQ(std::memcmp(back.data(), payload.data(), got), 0);
+      }
+    }
+    gcomp_options_destroy(o);
+    return w;
+  };
+
+  for (const auto & c : cells) {
+    gcomp_status_t s_without = GCOMP_OK;
+    gcomp_status_t s_with = GCOMP_OK;
+    const size_t without = encode(c, false, &s_without);
+    const size_t with = encode(c, true, &s_with);
+
+    ASSERT_EQ(s_without, GCOMP_OK)
+        << "threads=" << c.threads << " seekable=" << c.seekable
+        << " long=" << c.longmode;
+    ASSERT_EQ(s_with, GCOMP_OK)
+        << "threads=" << c.threads << " seekable=" << c.seekable
+        << " long=" << c.longmode;
+
+    EXPECT_LT(with * 4, without)
+        << "threads=" << c.threads << " seekable=" << c.seekable
+        << " long=" << c.longmode << ": " << with << " with a dictionary "
+        << "against " << without
+        << " without - the dictionary is not reaching the match finder in this "
+           "combination";
+  }
+
+  // The refused cell, asserted rather than skipped.
+  for (bool longmode : {false, true}) {
+    gcomp_options_t * o = nullptr;
+    ASSERT_EQ(gcomp_options_create(&o), GCOMP_OK);
+    ASSERT_EQ(gcomp_options_set_uint64(o, "threads.count", 4), GCOMP_OK);
+    ASSERT_EQ(gcomp_options_set_bool(o, "zstd.seekable", 1), GCOMP_OK);
+    if (longmode) {
+      ASSERT_EQ(gcomp_options_set_bool(o, "zstd.long", 1), GCOMP_OK);
+    }
+    ASSERT_EQ(gcomp_options_set_bytes(
+                  o, "zstd.dictionary", dict.data(), dict.size()),
+        GCOMP_OK);
+    size_t bound = 0;
+    ASSERT_EQ(
+        gcomp_encode_bound(nullptr, "zstd", o, payload.size(), &bound),
+        GCOMP_OK);
+    std::vector<uint8_t> out(bound ? bound : 1);
+    size_t w = 0;
+    EXPECT_EQ(gcomp_encode_buffer(nullptr, "zstd", o, payload.data(),
+                  payload.size(), out.data(), out.size(), &w),
+        GCOMP_ERR_UNSUPPORTED)
+        << "zstd.seekable with threads.count > 1 is refused on purpose; if this "
+           "now succeeds, check that the frame boundaries are the ones "
+           "zstd.seekable_frame_size asked for";
+    gcomp_options_destroy(o);
+  }
+}
+
+/**
+ * @brief zstd.long still reaches a far repeat with a dictionary and with threads.
+ *
+ * The dictionary grid above shows the dictionary working in every cell; this
+ * shows the *other* option working in combination, which needs a different
+ * payload - a repeat beyond MF_MAX_DISTANCE, where only the long matcher can
+ * reach it - and an explicit window, since the default level's 128 KiB window
+ * makes such a match illegal rather than merely hard to find.
+ */
+TEST(DictionaryEffect, LongDistanceMatchingComposesWithDictionaryAndThreads) {
+  // Beyond MF_MAX_DISTANCE (0x7FFFFF), and off the 128 KiB block grid so a
+  // broken rolling hash cannot pass by landing on block starts.
+  const size_t block = 256u * 1024u;
+  const size_t gap = 0x7FFFFF + block + 4096u;
+  const std::vector<uint8_t> dict = distinct_prefixes(65536, 31337);
+  const std::vector<uint8_t> run = distinct_prefixes(block, 1u);
+
+  // The filler is one 8 KiB pattern repeated, not fresh noise, and that is a
+  // speed decision rather than a shape one: 8 MiB of incompressible bytes is the
+  // match finder's worst case and took eleven seconds per encode, where a
+  // repeated pattern is matched away almost immediately. test_zstd_ldm.cpp's
+  // farRepeat() is built the same way for the same reason. What matters to this
+  // test is only the *distance* between the two copies of `run`.
+  const std::vector<uint8_t> pattern = distinct_prefixes(8u * 1024u, 2u);
+  std::vector<uint8_t> payload(run);
+  while (payload.size() < block + gap) {
+    const size_t take =
+        std::min(pattern.size(), block + gap - payload.size());
+    payload.insert(payload.end(), pattern.begin(), pattern.begin() + take);
+  }
+  payload.insert(payload.end(), run.begin(), run.end());
+
+  auto encode = [&](uint64_t threads, bool longmode, bool with_dict) {
+    gcomp_options_t * o = nullptr;
+    EXPECT_EQ(gcomp_options_create(&o), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_uint64(o, "threads.count", threads), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_int64(o, "zstd.level", 3), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_uint64(o, "zstd.window_log", 25), GCOMP_OK);
+    if (longmode) {
+      EXPECT_EQ(gcomp_options_set_bool(o, "zstd.long", 1), GCOMP_OK);
+    }
+    if (with_dict) {
+      EXPECT_EQ(gcomp_options_set_bytes(
+                    o, "zstd.dictionary", dict.data(), dict.size()),
+          GCOMP_OK);
+    }
+    size_t bound = 0;
+    EXPECT_EQ(
+        gcomp_encode_bound(nullptr, "zstd", o, payload.size(), &bound),
+        GCOMP_OK);
+    std::vector<uint8_t> out(bound ? bound : 1);
+    size_t w = 0;
+    EXPECT_EQ(gcomp_encode_buffer(nullptr, "zstd", o, payload.data(),
+                  payload.size(), out.data(), out.size(), &w),
+        GCOMP_OK)
+        << "threads=" << threads << " long=" << longmode
+        << " dict=" << with_dict;
+    EXPECT_EQ(gcomp_options_set_bool(o, "zstd.concat", 1), GCOMP_OK);
+    EXPECT_EQ(gcomp_options_set_uint64(o, "limits.max_expansion_ratio", 0),
+        GCOMP_OK);
+    std::vector<uint8_t> back(payload.size() + 65536);
+    size_t got = 0;
+    EXPECT_EQ(gcomp_decode_buffer(nullptr, "zstd", o, out.data(), w,
+                  back.data(), back.size(), &got),
+        GCOMP_OK);
+    EXPECT_EQ(got, payload.size());
+    if (got == payload.size()) {
+      EXPECT_EQ(std::memcmp(back.data(), payload.data(), got), 0);
+    }
+    gcomp_options_destroy(o);
+    return w;
+  };
+
+  for (uint64_t threads : {(uint64_t)1, (uint64_t)4}) {
+    for (bool with_dict : {false, true}) {
+      const size_t without = encode(threads, false, with_dict);
+      const size_t with = encode(threads, true, with_dict);
+      // The whole repeated block, less what a sequence costs - the bound
+      // test_zstd_ldm.cpp uses for the same claim.
+      EXPECT_LT(with + block / 2u, without)
+          << "threads=" << threads << " dict=" << with_dict
+          << ": with long " << with << ", without " << without
+          << " - long-distance matching found nothing in this combination";
+    }
   }
 }
 
