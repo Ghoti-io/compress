@@ -237,6 +237,108 @@ TEST(AllocApi, RespectsMaxOutputBytes) {
   gcomp_options_destroy(o);
 }
 
+/**
+ * @brief The ceiling is reported as a limit by **every** method.
+ *
+ * `RespectsMaxOutputBytes` above covers zstd, whose frame states its decompressed
+ * size - so `gcomp_decode_alloc()` takes its exact-ceiling path and the refusal
+ * comes from a different place than it does for a method that states nothing. The
+ * conclusion "the ceiling is refused with GCOMP_ERR_LIMIT" was drawn from that one
+ * method and generalised to seven.
+ *
+ * Six of the seven did answer that way. **gzip did not**: its `finish()` ignored
+ * the output buffer, so a full buffer with deflate data still to come was reported
+ * as `GCOMP_ERR_CORRUPT` - "gzip stream truncated in deflate data" - for a stream
+ * that was neither truncated nor corrupt. `font` found it on the first `.pcf.gz`
+ * it read under a ceiling of its own.
+ *
+ * So this sweeps the methods rather than naming one. A method added to the registry
+ * and not to this list is the gap that let the first one through, which is why the
+ * count is asserted too.
+ */
+TEST(AllocApi, EveryMethodReportsTheCeilingAsALimit) {
+  const std::vector<uint8_t> input = very_compressible(256 * 1024);
+  const char * methods[] = {
+      "gzip", "zlib", "deflate", "lz4", "lzw", "rle", "zstd"};
+  size_t swept = 0;
+
+  for (const char * method : methods) {
+    void * enc = nullptr;
+    size_t enc_len = 0;
+    ASSERT_EQ(gcomp_encode_alloc(nullptr, method, nullptr, input.data(),
+                  input.size(), &enc, &enc_len),
+        GCOMP_OK) << method;
+
+    gcomp_options_t * o = nullptr;
+    ASSERT_EQ(gcomp_options_create(&o), GCOMP_OK);
+    ASSERT_EQ(gcomp_options_set_uint64(o, "limits.max_output_bytes", 4096u),
+        GCOMP_OK);
+
+    void * dec = nullptr;
+    size_t dec_len = 0;
+    const gcomp_status_t s =
+        gcomp_decode_alloc(nullptr, method, o, enc, enc_len, &dec, &dec_len);
+    EXPECT_EQ(s, GCOMP_ERR_LIMIT)
+        << method << " reported " << gcomp_status_to_string(s)
+        << " for output past the ceiling, which is a fact about the caller's "
+           "limit and not about the data";
+    EXPECT_EQ(dec, nullptr) << method;
+
+    // And with a ceiling that fits, the same stream decodes - so the refusal
+    // above was the ceiling and not the method failing outright.
+    ASSERT_EQ(gcomp_options_set_uint64(
+                  o, "limits.max_output_bytes", 1024u * 1024u),
+        GCOMP_OK);
+    ASSERT_EQ(
+        gcomp_decode_alloc(nullptr, method, o, enc, enc_len, &dec, &dec_len),
+        GCOMP_OK) << method;
+    EXPECT_EQ(dec_len, input.size()) << method;
+    gcomp_buffer_free(nullptr, dec);
+
+    gcomp_options_destroy(o);
+    gcomp_buffer_free(nullptr, enc);
+    ++swept;
+  }
+  EXPECT_EQ(swept, 7u) << "a method was added to the registry and not to this "
+                          "list, which is how gzip's answer went unnoticed";
+}
+
+/**
+ * @brief A genuinely truncated gzip member still reports corruption.
+ *
+ * The control for the fix above: `finish()` now answers GCOMP_ERR_LIMIT when the
+ * output buffer is full, and it must not answer that when the buffer has room and
+ * the input really did end early. Without this the fix would have turned every
+ * truncated gzip into a limit, which `gcomp_decode_alloc()` would then try to grow
+ * its way out of.
+ */
+TEST(AllocApi, ATruncatedGzipIsStillCorrupt) {
+  const std::vector<uint8_t> input = very_compressible(256 * 1024);
+  void * enc = nullptr;
+  size_t enc_len = 0;
+  ASSERT_EQ(gcomp_encode_alloc(nullptr, "gzip", nullptr, input.data(),
+                input.size(), &enc, &enc_len),
+      GCOMP_OK);
+  ASSERT_GT(enc_len, 32u);
+
+  void * dec = nullptr;
+  size_t dec_len = 0;
+  // Half a member, under a ceiling that is not in the way.
+  gcomp_options_t * o = nullptr;
+  ASSERT_EQ(gcomp_options_create(&o), GCOMP_OK);
+  ASSERT_EQ(
+      gcomp_options_set_uint64(o, "limits.max_output_bytes", 8u * 1024u * 1024u),
+      GCOMP_OK);
+  const gcomp_status_t s =
+      gcomp_decode_alloc(nullptr, "gzip", o, enc, enc_len / 2, &dec, &dec_len);
+  EXPECT_EQ(s, GCOMP_ERR_CORRUPT)
+      << "a truncated member reported " << gcomp_status_to_string(s);
+  EXPECT_EQ(dec, nullptr);
+
+  gcomp_options_destroy(o);
+  gcomp_buffer_free(nullptr, enc);
+}
+
 /// The caller's options are not modified, however the decode is arranged.
 TEST(AllocApi, DoesNotModifyCallerOptions) {
   const std::vector<uint8_t> input = text_like(50000);

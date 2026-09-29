@@ -821,7 +821,7 @@ gcomp_status_t gzip_decoder_update(gcomp_decoder_t * decoder,
 //
 
 gcomp_status_t gzip_decoder_finish(
-    gcomp_decoder_t * decoder, GCOMP_MAYBE_UNUSED(gcomp_buffer_t * output)) {
+    gcomp_decoder_t * decoder, gcomp_buffer_t * output) {
   if (!decoder || !decoder->method_state) {
     return GCOMP_ERR_INVALID_ARG;
   }
@@ -840,6 +840,25 @@ gcomp_status_t gzip_decoder_finish(
         "gzip stream truncated in header (stage %d)", state->header_stage);
 
   case GZIP_DEC_STAGE_BODY:
+    // **Out of room is not the same as out of input**, and this stage is where
+    // both of them land: the body has not completed, and the reason is either
+    // that the file ended early or that there is nowhere left to put the rest.
+    // Reporting the first for the second tells a caller its data is broken when
+    // the truth is that its ceiling is low - and `gcomp_decode_alloc()`'s growth
+    // loop reads GCOMP_ERR_LIMIT as "grow and ask again", so it could not grow
+    // either. It stopped at the ceiling and reported corruption, which is how
+    // `font` found this: every `.pcf.gz` over a caller's
+    // `limits.max_output_bytes` came back as a corrupt font.
+    //
+    // A full output buffer means the second, and the answer costs nothing when it
+    // is wrong: the caller grows the buffer, asks again, and gets the truncation
+    // report from the branch below. Of the seven methods this was the only one
+    // that misreported - the other six were measured, which is why the test beside
+    // this sweeps all of them rather than one.
+    if (output && output->used >= output->size) {
+      return gcomp_decoder_set_error(decoder, GCOMP_ERR_LIMIT,
+          "gzip output buffer is full with deflate data still to come");
+    }
     return gcomp_decoder_set_error(
         decoder, GCOMP_ERR_CORRUPT, "gzip stream truncated in deflate data");
 
