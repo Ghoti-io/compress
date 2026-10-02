@@ -453,6 +453,17 @@ static int alpha_bits(int n) {
   return bits;
 }
 
+/* The canonical code is numbered MSB first. bw_put shifts the low bit out
+ * first, so the stored code is reversed and one put writes the symbol. */
+static uint16_t reverse_code(uint32_t code, int len) {
+  uint16_t rev = 0;
+  int i;
+  for (i = 0; i < len; i++) {
+    rev = (uint16_t)((rev << 1) | ((code >> i) & 1u));
+  }
+  return rev;
+}
+
 static void build_canon(const uint8_t * lens, int alphabet, brotli_canon_t * out) {
   int count[16];
   uint32_t next[16];
@@ -477,22 +488,16 @@ static void build_canon(const uint8_t * lens, int alphabet, brotli_canon_t * out
   for (i = 0; i < alphabet; i++) {
     int len = lens[i];
     if (len != 0) {
-      out[i].code = (uint16_t)next[len]++;
+      out[i].code = reverse_code(next[len]++, len);
     }
   }
 }
 
 static int put_canon(brotli_bw_t * b, const brotli_canon_t * c) {
-  int i;
   if (c->len == 0) {
     return 0;
   }
-  for (i = (int)c->len - 1; i >= 0; i--) {
-    if (bw_put(b, (c->code >> i) & 1u, 1) != 0) {
-      return -1;
-    }
-  }
-  return 0;
+  return bw_put(b, c->code, (int)c->len);
 }
 
 static int write_cl_static(brotli_bw_t * b, int v) {
@@ -835,6 +840,19 @@ static size_t match_len(const uint8_t * data, size_t n, size_t from, size_t pos)
     return 0;
   }
   max = n - pos;
+  while (len + 8u <= max) {
+    uint64_t a;
+    uint64_t b;
+    uint64_t diff;
+    memcpy(&a, data + from + len, sizeof(a));
+    memcpy(&b, data + pos + len, sizeof(b));
+    diff = a ^ b;
+    if (diff != 0) {
+      len += (size_t)(__builtin_ctzll(diff) / 8u);
+      return len;
+    }
+    len += 8u;
+  }
   while (len < max && data[from + len] == data[pos + len]) {
     len++;
   }
@@ -895,6 +913,7 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
   size_t lit = 0;
   size_t lit_at = 0;
   int ncmd = 0;
+  int misses = 0;
   int ok = 0;
   head = gcomp_calloc(alloc, BROTLI_HASH_SIZE, sizeof(*head));
   prev = gcomp_calloc(alloc, len, sizeof(*prev));
@@ -909,15 +928,33 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
   while (pos < len) {
     size_t mlen = 0;
     size_t mdist = 0;
-    size_t k;
+    size_t step;
     find_match(head, prev, data, len, pos, window, &mlen, &mdist);
     note_pos(head, prev, data, len, pos);
     if (mlen >= BROTLI_MIN_MATCH) {
+      size_t end = pos + mlen;
+      size_t k;
       if ((size_t)ncmd >= cap) {
         goto done;
       }
-      for (k = 1; k < mlen; k++) {
-        note_pos(head, prev, data, len, pos + k);
+      misses = 0;
+      /* A match that ends the chunk is never searched again, so the
+       * positions inside it do not belong in the chain. A long match
+       * that does not end the chunk is entered every fourth byte, plus
+       * its last four, which is what the next search can still reach. */
+      if (end < len && mlen > 64u) {
+        size_t tail = end - 4u;
+        for (k = pos + 4u; k < tail; k += 4u) {
+          note_pos(head, prev, data, len, k);
+        }
+        for (k = tail; k < end; k++) {
+          note_pos(head, prev, data, len, k);
+        }
+      }
+      else if (end < len) {
+        for (k = pos + 1u; k < end; k++) {
+          note_pos(head, prev, data, len, k);
+        }
       }
       cmds[ncmd].at = (uint32_t)lit_at;
       cmds[ncmd].insert = (uint32_t)lit;
@@ -925,7 +962,7 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
       cmds[ncmd].dist = (uint32_t)mdist;
       cmds[ncmd].tail = 0;
       ncmd++;
-      pos += mlen;
+      pos = end;
       lit = 0;
       lit_at = pos;
     }
@@ -933,8 +970,19 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
       if (lit == 0) {
         lit_at = pos;
       }
-      lit++;
-      pos++;
+      misses++;
+      step = 1;
+      if (misses > 64) {
+        step = (size_t)(misses >> 6);
+        if (step > 16u) {
+          step = 16u;
+        }
+      }
+      if (step > len - pos) {
+        step = len - pos;
+      }
+      lit += step;
+      pos += step;
     }
   }
   if (lit != 0) {
@@ -969,10 +1017,22 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
       if (p + cmds[c].copy > len) {
         goto done;
       }
-      for (i = 0; i < cmds[c].copy; i++) {
-        if (data[p + i] != data[p - cmds[c].dist + i]) {
+      i = 0;
+      while (i + 8u <= cmds[c].copy) {
+        uint64_t a;
+        uint64_t b;
+        memcpy(&a, data + p + i, sizeof(a));
+        memcpy(&b, data + (p - cmds[c].dist) + i, sizeof(b));
+        if (a != b) {
           goto done;
         }
+        i += 8u;
+      }
+      while (i < cmds[c].copy) {
+        if (data[p + i] != data[(p - cmds[c].dist) + i]) {
+          goto done;
+        }
+        i++;
       }
       p += cmds[c].copy;
     }
@@ -1078,8 +1138,64 @@ static int write_meta_align(brotli_bw_t * b) {
   return bw_align(b);
 }
 
+static unsigned floor_log2_u32(uint32_t v) {
+  if (v <= 1u) {
+    return 0;
+  }
+  return (unsigned)(31 - __builtin_clz(v));
+}
+
+/* ceil(log2(v)) for v >= 1. One more than floor(log2(v - 1)), which is an
+ * overestimate of log2(v) and so a safe input to a lower bound. */
+static unsigned ceil_log2_u32(uint32_t v) {
+  if (v <= 1u) {
+    return 0;
+  }
+  return floor_log2_u32(v - 1u) + 1u;
+}
+
+/* 1 when a Huffman encoding of these literals cannot be smaller than the
+ * stored form of the whole chunk. The literal cost is a Shannon lower
+ * bound (floor log of the count, ceil log of each frequency) plus two bits
+ * per used symbol for the code-length alphabet, which is the shortest
+ * static code-length symbol. Matches and the meta-block header are treated
+ * as free, so a block this rejects would have been rejected after encoding. */
+static int literals_cannot_win(const uint32_t lit_freq[256], size_t len) {
+  size_t stored = len + 3u * ((len + 65535u) / 65536u);
+  size_t nlit = 0;
+  int nnz = 0;
+  int i;
+  unsigned lg_n;
+  uint64_t bits = 0;
+  for (i = 0; i < 256; i++) {
+    if (lit_freq[i] != 0) {
+      nlit += lit_freq[i];
+      nnz++;
+    }
+  }
+  if (nnz > 1 && nlit > 0) {
+    lg_n = floor_log2_u32((uint32_t)nlit);
+    for (i = 0; i < 256; i++) {
+      uint32_t f = lit_freq[i];
+      unsigned lg_f;
+      if (f == 0) {
+        continue;
+      }
+      lg_f = ceil_log2_u32(f);
+      if (lg_n > lg_f) {
+        bits += (uint64_t)f * (unsigned)(lg_n - lg_f);
+      }
+    }
+  }
+  if (nnz > 4) {
+    bits += (uint64_t)nnz * 2u;
+  }
+  return bits / 8u >= stored;
+}
+
 static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
-    const uint8_t * data, const brotli_cmd_t * cmds, int ncmd, uint32_t rb[4]) {
+    const uint8_t * data, const brotli_cmd_t * cmds, int ncmd, size_t len,
+    uint32_t rb[4]) {
   uint32_t lit_freq[256];
   uint32_t ic_freq[704];
   uint32_t dist_freq[64];
@@ -1127,6 +1243,9 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
         push_dist(rb, cmds[c].dist);
       }
     }
+  }
+  if (literals_cannot_win(lit_freq, len)) {
+    return 1;
   }
   lit_code = gcomp_calloc(alloc, 256, sizeof(*lit_code));
   ic_code = gcomp_calloc(alloc, 704, sizeof(*ic_code));
@@ -1231,7 +1350,7 @@ int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
     gcomp_free(alloc, cmds);
     return 1;
   }
-  if (emit_block(alloc, &bw, data, cmds, ncmd, rb) != 0) {
+  if (emit_block(alloc, &bw, data, cmds, ncmd, len, rb) != 0) {
     gcomp_free(alloc, cmds);
     return 1;
   }

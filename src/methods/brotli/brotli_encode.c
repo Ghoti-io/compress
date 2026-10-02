@@ -347,8 +347,15 @@ gcomp_status_t brotli_encoder_update(gcomp_encoder_t * encoder,
   }
   src = input->data ? (const uint8_t *)input->data : NULL;
   for (;;) {
-    while (input->used < input->size && st->hold_len < st->hold_cap) {
-      st->hold[st->hold_len++] = src[input->used++];
+    {
+      size_t room = st->hold_cap - st->hold_len;
+      size_t avail = input->size - input->used;
+      size_t take = room < avail ? room : avail;
+      if (take != 0) {
+        memcpy(st->hold + st->hold_len, src + input->used, take);
+        st->hold_len += take;
+        input->used += take;
+      }
     }
     if (st->hold_len < st->hold_cap) {
       break;
