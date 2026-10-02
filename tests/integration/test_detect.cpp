@@ -109,14 +109,15 @@ TEST(Detect, DetectedMethodDecodes) {
 /**
  * @brief The formats that begin with data cannot be detected, and must not be.
  *
- * A deflate, LZW or RLE stream starts with whatever the first block or packet
- * happens to be. The only honest answer is that it is not known - except that
+ * A deflate, LZW, RLE or brotli stream starts with whatever the first block
+ * happens to be. Brotli's first bits are a window size, not a magic number.
+ * The only honest answer is that it is not known - except that
  * a two-byte prefix can coincidentally satisfy zlib's header check, which the
  * zlib case below measures.
  */
 TEST(Detect, DoesNotGuessAtHeaderlessFormats) {
   const std::vector<uint8_t> input = sample_input();
-  for (const char * method : {"deflate", "lzw", "rle"}) {
+  for (const char * method : {"deflate", "lzw", "rle", "brotli"}) {
     std::vector<uint8_t> stream = encode_with(method, input);
     const char * name = nullptr;
     gcomp_status_t s =

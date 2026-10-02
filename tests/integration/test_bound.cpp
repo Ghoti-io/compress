@@ -286,6 +286,14 @@ std::vector<Config> configurations() {
         }});
   }
 
+  c.push_back({"brotli/default", "brotli", nullptr});
+  for (int64_t lgwin : {10, 24}) {
+    c.push_back({"brotli/lgwin" + std::to_string(lgwin), "brotli",
+        [lgwin](gcomp_options_t * o) {
+          gcomp_options_set_int64(o, "brotli.lgwin", lgwin);
+        }});
+  }
+
   c.push_back({"rle/default", "rle", nullptr});
   for (const char * fmt : {"packbits", "tga"}) {
     std::string f = fmt;
@@ -390,6 +398,9 @@ TEST(EncodeBound, Lzw) {
 }
 TEST(EncodeBound, Rle) {
   sweep_method("rle");
+}
+TEST(EncodeBound, Brotli) {
+  sweep_method("brotli");
 }
 
 /**
@@ -546,7 +557,7 @@ TEST(EncodeBound, IsNotWildlyLoose) {
       all_one(n)};
 
   for (const char * method :
-      {"deflate", "zlib", "gzip", "zstd", "lz4", "rle", "lzw"}) {
+      {"deflate", "zlib", "gzip", "zstd", "lz4", "rle", "lzw", "brotli"}) {
     size_t bound = 0;
     ASSERT_EQ(gcomp_encode_bound(nullptr, method, nullptr, n, &bound),
         GCOMP_OK);
@@ -678,7 +689,7 @@ TEST(EncodeBound, RejectsBadArguments) {
 /// Zero in, something out: every framed format still writes its frame.
 TEST(EncodeBound, EmptyInput) {
   for (const char * method :
-      {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle"}) {
+      {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli"}) {
     size_t bound = 0;
     ASSERT_EQ(gcomp_encode_bound(nullptr, method, nullptr, 0, &bound),
         GCOMP_OK)

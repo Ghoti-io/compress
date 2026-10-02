@@ -561,7 +561,8 @@ TEST(OptionValidationTest, ZeroIsAcceptedForTheLimitsThatMeanUnlimited) {
   // Zero means "unlimited" for these, and GzipLimitsTest asserts exactly that
   // for both -- so a schema declaring a minimum of 1 rejects a documented
   // value before the method ever sees it.  lz4 and zstd both declared one.
-  for (const char * method : {"lz4", "zstd", "lzw", "rle", "deflate", "gzip"}) {
+  for (const char * method :
+      {"lz4", "zstd", "lzw", "rle", "deflate", "gzip", "brotli"}) {
     EXPECT_EQ(createEncoderWith(method, setZeroOutputAndRatio), GCOMP_OK)
         << method << ": zero output/ratio limits must be accepted";
     EXPECT_EQ(createDecoderWith(method, setZeroOutputAndRatio), GCOMP_OK)
@@ -589,7 +590,8 @@ TEST(OptionValidationTest, ZeroMeansUnlimitedForEveryLimitOnEveryMethod) {
   static const char * kKeys[] = {"limits.max_output_bytes",
       "limits.max_memory_bytes", "limits.max_expansion_ratio"};
 
-  for (const char * method : {"deflate", "gzip", "lz4", "lzw", "rle", "zstd"}) {
+  for (const char * method :
+      {"deflate", "gzip", "lz4", "lzw", "rle", "zstd", "brotli"}) {
     for (const char * key : kKeys) {
       gcomp_options_t * opts = nullptr;
       ASSERT_EQ(gcomp_options_create(&opts), GCOMP_OK);
@@ -623,7 +625,8 @@ TEST(OptionValidationTest, LimitsAreStillEnforcedWhenTheyAreNotZero) {
   // The other half: making 0 mean unlimited must not have made every limit
   // toothless.
   std::vector<uint8_t> data(20000, 'q');
-  for (const char * method : {"deflate", "gzip", "lz4", "lzw", "rle", "zstd"}) {
+  for (const char * method :
+      {"deflate", "gzip", "lz4", "lzw", "rle", "zstd", "brotli"}) {
     std::vector<uint8_t> enc(data.size() * 2 + 65536);
     size_t enc_len = 0;
     ASSERT_EQ(gcomp_encode_buffer(nullptr, method, nullptr, data.data(),

@@ -870,6 +870,7 @@ FUZZ_DEPFILES := $(patsubst fuzz/%.c,$(APP_DIR)/fuzz/%.d,$(FUZZ_SOURCES))
 .PHONY: fuzz-lzw-decoder fuzz-lzw-encoder fuzz-lzw-roundtrip
 .PHONY: fuzz-zstd-decoder fuzz-zstd-encoder fuzz-zstd-roundtrip
 .PHONY: fuzz-zlib-decoder fuzz-zlib-encoder fuzz-zlib-roundtrip
+.PHONY: fuzz-brotli-decoder fuzz-brotli-encoder fuzz-brotli-roundtrip
 # Sanitizer commands
 .PHONY: test-asan test-asan-quiet test-ubsan sanitizer-help
 .PHONY: test-tsan test-tsan-quiet test-tsan-threads
@@ -1012,6 +1013,11 @@ fuzz-help: ## Show fuzzing help and instructions
 	@printf "    make fuzz-zlib-decoder  - Run zlib decoder fuzzer\n"
 	@printf "    make fuzz-zlib-encoder  - Run zlib encoder fuzzer\n"
 	@printf "    make fuzz-zlib-roundtrip- Run zlib roundtrip fuzzer\n"
+	@printf "\n"
+	@printf "  Brotli fuzzers:\n"
+	@printf "    make fuzz-brotli-decoder  - Run Brotli decoder fuzzer\n"
+	@printf "    make fuzz-brotli-encoder  - Run Brotli encoder fuzzer\n"
+	@printf "    make fuzz-brotli-roundtrip- Run Brotli roundtrip fuzzer\n"
 	@printf "\n"
 	@printf "Workflow:\n"
 	@printf "  1. make fuzz-corpus        # Generate seed inputs\n"
@@ -1415,6 +1421,51 @@ fuzz-zstd-roundtrip: $(APP_DIR)/fuzz/fuzz_zstd_roundtrip$(EXE_EXTENSION)
 		printf 'Hello' > fuzz/corpus/zstd_roundtrip/hello.bin; \
 	fi
 	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/zstd_roundtrip -o fuzz/findings/zstd_roundtrip -- $(APP_DIR)/fuzz/fuzz_zstd_roundtrip$(EXE_EXTENSION)
+
+fuzz-brotli-decoder: ## Run Brotli decoder fuzzer (Ctrl+C to stop)
+fuzz-brotli-decoder: $(APP_DIR)/fuzz/fuzz_brotli_decoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running Brotli Decoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/brotli_decoder
+	@if [ ! -d fuzz/corpus/brotli_decoder ] || [ -z "$$(ls -A fuzz/corpus/brotli_decoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/brotli_decoder; \
+		printf '\x06' > fuzz/corpus/brotli_decoder/empty.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/brotli_decoder -o fuzz/findings/brotli_decoder -- $(APP_DIR)/fuzz/fuzz_brotli_decoder$(EXE_EXTENSION)
+
+fuzz-brotli-encoder: ## Run Brotli encoder fuzzer (Ctrl+C to stop)
+fuzz-brotli-encoder: $(APP_DIR)/fuzz/fuzz_brotli_encoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running Brotli Encoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/brotli_encoder
+	@if [ ! -d fuzz/corpus/brotli_encoder ] || [ -z "$$(ls -A fuzz/corpus/brotli_encoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/brotli_encoder; \
+		printf 'Hello' > fuzz/corpus/brotli_encoder/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/brotli_encoder -o fuzz/findings/brotli_encoder -- $(APP_DIR)/fuzz/fuzz_brotli_encoder$(EXE_EXTENSION)
+
+fuzz-brotli-roundtrip: ## Run Brotli roundtrip fuzzer (Ctrl+C to stop)
+fuzz-brotli-roundtrip: $(APP_DIR)/fuzz/fuzz_brotli_roundtrip$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running Brotli Roundtrip Fuzzer   ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/brotli_roundtrip
+	@if [ ! -d fuzz/corpus/brotli_roundtrip ] || [ -z "$$(ls -A fuzz/corpus/brotli_roundtrip 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/brotli_roundtrip; \
+		printf 'Hello' > fuzz/corpus/brotli_roundtrip/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/brotli_roundtrip -o fuzz/findings/brotli_roundtrip -- $(APP_DIR)/fuzz/fuzz_brotli_roundtrip$(EXE_EXTENSION)
 
 # The zlib harnesses existed for a while with no way to be run: fuzz-replay fed
 # them, because it feeds every harness it finds, but there was no campaign
@@ -2429,6 +2480,7 @@ ORACLE := tools/oracle
 ORACLE_TEST_NAMES := testZstd_oracle testZstd_walk testZstd_dict_format \
 	testGzip_oracle testZlib_oracle testZlib_dictionary testLz4_spec_oracle \
 	testLz4_walk testDeflate_oracle testLzw_spec_oracle testRle_spec_oracle \
+	testBrotli \
 	testOracle testSeekable testGolden_provenance
 ORACLE_TESTS := $(addprefix $(APP_DIR)/,$(addsuffix $(EXE_EXTENSION),$(ORACLE_TEST_NAMES)))
 
@@ -2437,7 +2489,7 @@ ORACLE_TESTS := $(addprefix $(APP_DIR)/,$(addsuffix $(EXE_EXTENSION),$(ORACLE_TE
 
 oracle-build: ## Build the pinned oracle image from its Containerfile
 	@printf "\n### Building the oracle reference image ###\n"
-	podman build -t ghoti-compress-oracle-refs:deb13-2 \
+	podman build -t ghoti-compress-oracle-refs:deb13-3 \
 		-f $(ORACLE)/containers/refs/Containerfile \
 		$(ORACLE)/containers/refs
 

@@ -1,0 +1,16 @@
+#!/bin/sh
+# libbrotli's own claim, asked the way the tests ask it.
+#
+# There is no brotli CLI in this image. The oracles dlopen libbrotlienc.so.1
+# and libbrotlidec.so.1, so this loads the encoder soname and calls
+# BrotliEncoderVersion(). The Debian package version is a different fact:
+# 1.1.0-2+b7 is the package, and the library reports 1.1.0.
+exec python3 -c '
+import ctypes
+lib = ctypes.CDLL("libbrotlienc.so.1")
+lib.BrotliEncoderVersion.restype = ctypes.c_uint32
+v = lib.BrotliEncoderVersion()
+major = (v >> 24) & 0xFF
+minor = (v >> 12) & 0xFFF
+patch = v & 0xFFF
+print("libbrotli %d.%d.%d" % (major, minor, patch))'

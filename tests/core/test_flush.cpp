@@ -37,7 +37,7 @@ namespace {
 
 /// Every method the library registers, so a new one cannot quietly opt out.
 const char * const kMethods[] = {"rle", "lzw", "lz4", "deflate", "gzip",
-    "zlib", "zstd"};
+    "zlib", "zstd", "brotli"};
 
 /**
  * Data with three characters: text that compresses through matches, a long

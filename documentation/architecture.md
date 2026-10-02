@@ -120,11 +120,11 @@ headers, so anything in the tree above is part of what a consumer receives.
 The following are used only inside the library and are **not** part of the public API. Do not include them from application code; they may change or be removed without notice.
 
 - **Core internal:** `endian.h`, `alloc_internal.h`, `registry_internal.h`, `stream_internal.h`, and other `*_internal.h` under `src/core/`. Overflow-checked size arithmetic comes from cutil (`<ghoti.io/cutil/safemath.h>`); it used to be a local `safe_math.h` carrying the same functions.
-- **Method internal:** Each method has an `*_internal.h` (e.g. `deflate_internal.h`, `gzip_internal.h`, `lz4_internal.h`, `zstd_internal.h`, `rle_internal.h`, `lzw_internal.h`) for shared state and helpers within that method only. Some methods also use internal-only modules (e.g. `lzw_hash.h` / `lzw_hash.c`).
+- **Method internal:** Each method has an `*_internal.h` (e.g. `deflate_internal.h`, `gzip_internal.h`, `lz4_internal.h`, `zstd_internal.h`, `rle_internal.h`, `lzw_internal.h`, `brotli_internal.h`) for shared state and helpers within that method only. Some methods also use internal-only modules (e.g. `lzw_hash.h` / `lzw_hash.c`).
 
 ### Method Layer
 
-Each compression method (deflate, gzip, zlib, LZ4, LZW, RLE, zstd) implements the `gcomp_method_t` interface:
+Each compression method (deflate, gzip, zlib, LZ4, LZW, RLE, zstd, brotli) implements the `gcomp_method_t` interface:
 
 ```c
 struct gcomp_method_s {
@@ -515,6 +515,7 @@ compress/
 │   ├── errors.h                  # Status codes
 │   ├── allocator.h               # Memory allocation
 │   ├── limits.h                  # Safety limits
+│   ├── brotli.h                  # Brotli-specific API
 │   ├── deflate.h                 # Deflate-specific API
 │   ├── gzip.h                    # Gzip-specific API
 │   ├── lz4.h                     # LZ4-specific API
@@ -560,6 +561,13 @@ compress/
 │   │   └── autoreg_platform.h    # Platform-specific constructors
 │   │
 │   └── methods/                  # Compression method implementations
+│       ├── brotli/
+│       │   ├── brotli_decode.c   # RFC 7932 decoder
+│       │   ├── brotli_encode.c   # Section 11.1 uncompressed meta-blocks
+│       │   ├── brotli_prefix.c   # Prefix codes
+│       │   ├── brotli_dict.c     # Static dictionary transforms
+│       │   ├── brotli_tables.c   # Dictionary, transforms, context LUTs
+│       │   └── brotli_register.c # Vtable and registration
 │       ├── deflate/
 │       │   ├── deflate_encode.c  # Encoder: match finder, parses, blocks
 │       │   ├── deflate_decode.c  # Decoder
@@ -698,6 +706,7 @@ stream. That was a live defect in both, fixed in `lz4_encoder.c` and
 Deflate and zstd use separate bit I/O code by design; the duplication is intentional.
 
 - **Deflate** uses LSB-first (least significant bit first) bit I/O in `src/methods/deflate/bitreader.c` and `bitwriter.c`, per RFC 1951.
+- **Brotli** uses LSB-first bit I/O in `src/methods/brotli/brotli_bits.h`, per RFC 7932. It is its own reader; it does not share deflate's.
 - **Zstd** uses MSB-first (most significant bit first) bit I/O in its own modules (`zstd_fse.c`, `zstd_huf.c`, `zstd_sequences.c`, `zstd_sequences_encode.c`, etc.) per the Zstandard specification.
 - **LZW** uses LSB-first (GIF) or MSB-first (TIFF) bit I/O in `src/methods/lzw/lzw_bitio.c`. The choice is profile-driven and affects on-the-wire representation.
 
@@ -706,6 +715,7 @@ Implementations are intentionally separate due to bit order and format-specific 
 ## Related Documentation
 
 - [Streaming API](api/streaming.md) - Detailed streaming usage patterns
+- [Brotli Module](modules/brotli.md) - Brotli window and the trivial encoder
 - [Deflate Module](modules/deflate.md) - Deflate-specific options and usage
 - [Gzip Module](modules/gzip.md) - Gzip-specific options and usage
 - [LZ4 Module](modules/lz4.md) - LZ4-specific options and usage

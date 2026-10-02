@@ -35,6 +35,7 @@
 
 #include "failing_allocator.h"
 
+#include <ghoti.io/compress/brotli.h>
 #include <ghoti.io/compress/compress.h>
 #include <ghoti.io/compress/deflate.h>
 #include <ghoti.io/compress/gzip.h>
@@ -173,6 +174,9 @@ gcomp_status_t register_all(gcomp_registry_t * reg) {
     return s;
   }
   if ((s = gcomp_method_rle_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_brotli_register(reg)) != GCOMP_OK) {
     return s;
   }
   return gcomp_method_zstd_register(reg);
@@ -747,6 +751,11 @@ void add_scenarios(std::vector<Scenario> & out) {
   out.push_back({"rle/tga/runs", "rle", str("rle.format", "tga"), runs,
       Mode::StreamingTiny, false, 256});
   out.push_back({"rle/buffer", "rle", nullptr, runs, Mode::Buffer, false});
+
+  out.push_back(
+      {"brotli/text", "brotli", nullptr, text, Mode::StreamingTiny, false});
+  out.push_back(
+      {"brotli/buffer", "brotli", nullptr, text, Mode::Buffer, false});
 }
 
 //
@@ -794,6 +803,9 @@ TEST(AllocFailure, Lzw) {
 }
 TEST(AllocFailure, Rle) {
   sweep_method("rle");
+}
+TEST(AllocFailure, Brotli) {
+  sweep_method("brotli");
 }
 
 /**

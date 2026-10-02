@@ -181,7 +181,7 @@ GCOMP_API gcomp_status_t gcomp_encode_bound(gcomp_registry_t * registry,
  * separately from the values they guard, since zero is a legitimate content
  * size and a legitimate dictionary ID.
  *
- * Three of the seven formats have no header at all (deflate, LZW, RLE). For
+ * Three formats have no header at all (deflate, LZW, RLE). For
  * those, @ref header_size is zero and only @ref window_size is meaningful.
  */
 typedef struct gcomp_stream_info_s {

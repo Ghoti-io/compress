@@ -15,7 +15,7 @@
 is changed, and each of the three is forced by something about this library
 rather than chosen:
 
-  1. **The PROBE table names five references and they share one image.** The
+  1. **The PROBE table names six references and they share one image.** The
      other libraries have an image per reference. Here one test binary consults
      three of them in a single run, and `/usr/bin/zstd` links `liblz4.so.1`, so
      the set cannot be split without an image whose pinned CLI does not run.
@@ -37,7 +37,7 @@ Three properties, in the order they matter:
      that does not match its pin - each raises. "Skipped" printed where a
      comparison should be is the failure this directory exists to avoid, and it
      is the failure this library shipped for months: `pkg-config` could not see
-     two of these five, and nothing anywhere recorded what version any of them
+     two of these references, and nothing anywhere recorded what version any of them
      was.
 
   2. **It says which instrument answered.** `provenance()` returns the line a
@@ -84,13 +84,15 @@ class OracleUnavailable(Exception):
 # checks - `font`'s first draft of its image wrote the script with printf and
 # its \x27 escapes reached the file literally.
 #
-# Two of these five name something other than the package, and the comments in
+# Several of these name something other than the package, and the comments in
 # containers/IMAGES say why: `zlib` is the zlib python3 links rather than
-# python3, and `pyzstd` names the zstd its dependency compiled in as well as
-# its own version, because that dependency is declared as an open range.
+# python3, `pyzstd` names the zstd its dependency compiled in as well as its
+# own version, and `liblz4` and `libbrotli` are what those libraries report
+# when the tests dlopen them, not the Debian revision.
 PROBE = {
     "zstd": (["zstd-version"], "zstd "),
     "liblz4": (["lz4-version"], "liblz4 "),
+    "libbrotli": (["brotli-version"], "libbrotli "),
     "zlib": (["zlib-version"], "zlib "),
     "gzip": (["gzip-version"], "gzip "),
     "pyzstd": (["pyzstd-version"], "pyzstd "),
@@ -111,6 +113,11 @@ HOST_PROBE = {
         "l=ctypes.CDLL('liblz4.so.1');"
         "l.LZ4_versionString.restype=ctypes.c_char_p;"
         "print('liblz4', l.LZ4_versionString().decode())"],
+    "libbrotli": ["python3", "-c", "import ctypes;"
+        "l=ctypes.CDLL('libbrotlienc.so.1');"
+        "l.BrotliEncoderVersion.restype=ctypes.c_uint32;"
+        "v=l.BrotliEncoderVersion();"
+        "print('libbrotli %d.%d.%d' % ((v >> 24) & 0xFF, (v >> 12) & 0xFFF, v & 0xFFF))"],
     "zlib": ["python3", "-c",
         "import zlib; print('zlib', zlib.ZLIB_RUNTIME_VERSION)"],
     "gzip": ["sh", "-c",

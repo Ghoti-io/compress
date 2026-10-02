@@ -9,14 +9,14 @@ This is what the library implements. Each method is written here against
 libc.
 
 - Deflate (RFC 1951), zlib (RFC 1950) and gzip (RFC 1952).
-- LZ4, LZW, RLE and zstd.
+- Brotli (RFC 7932), LZ4, LZW, RLE and zstd.
 
 ## Before you call it
 
 - `GCOMP_ERR_LIMIT` means the output buffer is full and the stream is not finished. Call again with more room. `GCOMP_OK` from a finish means the stream is complete.
 - Encoded bytes do not depend on how small that buffer was.
 - `gcomp_encoder_flush()` hands a peer everything consumed so far without ending the stream.
-- `gcomp_registry_default()` already holds the seven methods. A caller can build a registry of its own.
+- `gcomp_registry_default()` already holds the eight methods. A caller can build a registry of its own.
 
 | Method | What it means here |
 | --- | --- |
@@ -24,6 +24,7 @@ libc.
 | `"zlib"` | RFC 1950. |
 | `"gzip"` | RFC 1952. |
 | `"lz4"` | `threads.count` encodes blocks in parallel. That output is byte-identical to the single-threaded stream. |
+| `"brotli"` | RFC 7932. The encoder writes uncompressed meta-blocks (section 11.1). The decoder reads the format. |
 | `"lzw"`, `"rle"` | The same registry, the same buffer rule. |
 | `"zstd"` | `threads.count` encodes blocks in parallel. `seekable.h` is random access into a seekable frame. |
 
@@ -148,7 +149,7 @@ program that links `ghoti.io-compress-0` links this too.
 
 ## Status
 
-All seven methods encode and decode, including through a bounded output
+All eight methods encode and decode, including through a bounded output
 buffer.
 
 ## License

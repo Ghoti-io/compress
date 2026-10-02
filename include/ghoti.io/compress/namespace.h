@@ -176,6 +176,7 @@
 #define gcomp_memory_check_limit GHOTIIO_COMPRESS(gcomp_memory_check_limit)
 #define gcomp_memory_track_alloc GHOTIIO_COMPRESS(gcomp_memory_track_alloc)
 #define gcomp_memory_track_free GHOTIIO_COMPRESS(gcomp_memory_track_free)
+#define gcomp_method_brotli_register GHOTIIO_COMPRESS(gcomp_method_brotli_register)
 #define gcomp_method_deflate_register GHOTIIO_COMPRESS(gcomp_method_deflate_register)
 #define gcomp_method_get_all_schemas GHOTIIO_COMPRESS(gcomp_method_get_all_schemas)
 #define gcomp_method_zlib_register GHOTIIO_COMPRESS(gcomp_method_zlib_register)

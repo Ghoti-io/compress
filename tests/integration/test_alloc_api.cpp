@@ -38,7 +38,7 @@
 namespace {
 
 const char * const kMethods[] = {
-    "deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle"};
+    "deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli"};
 
 /// Compressible, but not so compressible that it says nothing.
 std::vector<uint8_t> text_like(size_t len) {
@@ -244,9 +244,9 @@ TEST(AllocApi, RespectsMaxOutputBytes) {
  * size - so `gcomp_decode_alloc()` takes its exact-ceiling path and the refusal
  * comes from a different place than it does for a method that states nothing. The
  * conclusion "the ceiling is refused with GCOMP_ERR_LIMIT" was drawn from that one
- * method and generalised to seven.
+ * method and generalised to every method.
  *
- * Six of the seven did answer that way. **gzip did not**: its `finish()` ignored
+ * Six of them did answer that way. **gzip did not**: its `finish()` ignored
  * the output buffer, so a full buffer with deflate data still to come was reported
  * as `GCOMP_ERR_CORRUPT` - "gzip stream truncated in deflate data" - for a stream
  * that was neither truncated nor corrupt. `font` found it on the first `.pcf.gz`
@@ -259,7 +259,7 @@ TEST(AllocApi, RespectsMaxOutputBytes) {
 TEST(AllocApi, EveryMethodReportsTheCeilingAsALimit) {
   const std::vector<uint8_t> input = very_compressible(256 * 1024);
   const char * methods[] = {
-      "gzip", "zlib", "deflate", "lz4", "lzw", "rle", "zstd"};
+      "gzip", "zlib", "deflate", "lz4", "lzw", "rle", "zstd", "brotli"};
   size_t swept = 0;
 
   for (const char * method : methods) {
@@ -299,7 +299,7 @@ TEST(AllocApi, EveryMethodReportsTheCeilingAsALimit) {
     gcomp_buffer_free(nullptr, enc);
     ++swept;
   }
-  EXPECT_EQ(swept, 7u) << "a method was added to the registry and not to this "
+  EXPECT_EQ(swept, 8u) << "a method was added to the registry and not to this "
                           "list, which is how gzip's answer went unnoticed";
 }
 

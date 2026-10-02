@@ -6,9 +6,9 @@ produced the bytes. Those are round trips, and a round trip cannot see a
 misreading of the specification that the encoder and decoder share.
 
 The oracle tests are the part that is not self-referential. They compare against
-implementations nobody here wrote: the `zstd` CLI, `liblz4`, `gzip`, Python's
-`zlib` module, and `pyzstd`. Fourteen test files carry **fifteen availability
-sentinels** (`OracleIsActuallyAvailable`, and `RealImplementationIsActuallyAvailable`
+implementations nobody here wrote: the `zstd` CLI, `liblz4`, `libbrotli`,
+`gzip`, Python's `zlib` module, and `pyzstd`. Fifteen test files carry **sixteen
+availability sentinels** (`OracleIsActuallyAvailable`, and `RealImplementationIsActuallyAvailable`
 where one file has two references) which *fail* when their reference is absent,
 because a skipped oracle test and an absent one are the same line in a summary.
 
@@ -18,7 +18,8 @@ This page is about the other half of that: not whether a reference is there, but
 ## The problem a container solves here
 
 Presence was enforced; the version was not recorded anywhere. A run on this
-machine compared against `zstd` 1.5.7, `liblz4` 1.10.0, `zlib` 1.3.1, `gzip`
+machine compared against `zstd` 1.5.7, `liblz4` 1.10.0, `libbrotli` 1.1.0,
+`zlib` 1.3.1, `gzip`
 1.13 and whatever `pyzstd` `pip` last resolved - and nothing in the repository
 said any of that, so a green run named a set of tool names rather than a set of
 behaviours. Two consequences, and the second is worse:
@@ -39,7 +40,7 @@ need to be.
 
 `tools/oracle/containers/IMAGES` is the manifest: one line per reference, with
 the version it must claim when asked. All five lines name one image, built from
-`tools/oracle/containers/refs/Containerfile`.
+`tools/oracle/containers/refs/Containerfile`. Six references, one image.
 
 The base is pinned by digest, the pip packages by exact version, and Debian's
 packages by full apt version **against a dated snapshot** rather than the live
@@ -54,6 +55,7 @@ from one frozen archive state, so the whole transitive closure is reproducible.
 | --- | --- | --- |
 | `zstd` | zstd 1.5.7 | frames, blocks, dictionaries, the seek table |
 | `liblz4` | liblz4 1.10.0 | the LZ4 frame and block formats |
+| `libbrotli` | libbrotli 1.1.0 | RFC 7932, both directions |
 | `zlib` | zlib 1.3.1 | RFC 1950 and RFC 1951 |
 | `gzip` | gzip 1.13 | RFC 1952 member structure |
 | `pyzstd` | pyzstd 0.19.1 zstd 1.5.7 | the seekable format, dictionary training |
@@ -71,8 +73,11 @@ Three of those version strings are deliberately not the name of a package:
 - **`liblz4`** is asked by loading the soname and calling
   `LZ4_versionString()`, which is how the tests reach it. No `lz4` CLI is
   installed; a CLI's version is a fact about a different file.
+- **`libbrotli`** is asked the same way: `dlopen` of `libbrotlienc.so.1` and
+  `BrotliEncoderVersion()`. The package pin is `libbrotli1` 1.1.0-2+b7; the
+  library reports 1.1.0. No CLI and no `-dev` package.
 
-### One image, not five
+### One image, not six
 
 Every other library in the suite has an image per reference. This one
 cannot, for two measured reasons:
@@ -81,8 +86,9 @@ cannot, for two measured reasons:
   liblz4 has no working zstd CLI either.
 - What runs inside the image is a **compiled test binary**, not a driver script.
   A single binary consults up to three of these references in one run, and
-  `liblz4` is reached by `dlopen` - so the only way to pin it at all is for the
-  binary that loads it to be the process running in the image.
+  `liblz4` and `libbrotli` are reached by `dlopen` - so the only way to pin
+  them at all is for the binary that loads them to be the process running in
+  the image.
 
 The binaries are built on the host, against the host's own compiler, and only
 *run* inside. This image pins the references; it does not pin the build.
@@ -137,7 +143,7 @@ belong in a gate that must be green to merge.
 ```bash
 make oracle-build      # build the image: once, and whenever a pin moves
 make oracle-version    # print every reference and its version, or fail
-make check-oracle      # run the fourteen oracle suites against the pinned set
+make check-oracle      # run the fifteen oracle suites against the pinned set
 make oracle-help       # the short version of this page
 ```
 

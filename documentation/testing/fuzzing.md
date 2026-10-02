@@ -51,7 +51,7 @@ make fuzz-roundtrip  # Fuzz encode+decode roundtrip
 # 4. Press Ctrl+C to stop fuzzing
 ```
 
-Decoder, encoder, and roundtrip fuzz harnesses exist for **deflate**, **gzip**, **LZ4**, **zstd**, **rle**, and **lzw**. See the `fuzz/` directory for the full list of harnesses and `make help` (or the Fuzz Testing section below) for available targets.
+Decoder, encoder, and roundtrip fuzz harnesses exist for **deflate**, **gzip**, **LZ4**, **zstd**, **rle**, **lzw**, **zlib**, and **brotli**. See the `fuzz/` directory for the full list of harnesses and `make help` (or the Fuzz Testing section below) for available targets.
 
 ## Available Fuzz Targets
 
@@ -238,16 +238,31 @@ window descriptor, and what a decoder does with a window a frame merely
 
 ```bash
 make fuzz-zlib-decoder
+make fuzz-zlib-encoder
 make fuzz-zlib-roundtrip
 ```
 
-There is no zlib encoder harness; `fuzz_zlib_roundtrip` covers that direction.
-Both harnesses existed before either of these targets did, and could only be
+The three harnesses existed before any of these targets did, and could only be
 reached through `make fuzz-replay`, which feeds every harness it finds.
 
 The container is thin - CMF/FLG, deflate, a big-endian Adler-32 (RFC 1950) -
 so what the decoder harness is really probing is the header's FCHECK and FDICT
 bits and the trailer, on top of everything the deflate harness already covers.
+
+## Brotli Fuzz Targets
+
+```bash
+make fuzz-brotli-decoder
+make fuzz-brotli-encoder
+make fuzz-brotli-roundtrip
+```
+
+The decoder harness reads arbitrary bytes. `make fuzz-corpus` seeds it with
+streams this encoder wrote. The harness caps the window at `1 << 22` and the
+expansion ratio at 4096, so a mutated window of 23 or 24 is refused rather
+than allocated. The encoder harness writes section 11.1 meta-blocks. The
+roundtrip harness aborts if a stream this encoder just wrote does not decode
+back to the input.
 
 ## Understanding AFL++ Output
 
@@ -484,7 +499,11 @@ fuzz/
 ├── fuzz_zstd_encoder.c      # Zstd encoder fuzz harness
 ├── fuzz_zstd_roundtrip.c    # Zstd roundtrip fuzz harness
 ├── fuzz_zlib_decoder.c      # zlib decoder fuzz harness
+├── fuzz_zlib_encoder.c      # zlib encoder fuzz harness
 ├── fuzz_zlib_roundtrip.c    # zlib roundtrip fuzz harness
+├── fuzz_brotli_decoder.c    # Brotli decoder fuzz harness
+├── fuzz_brotli_encoder.c    # Brotli encoder fuzz harness
+├── fuzz_brotli_roundtrip.c  # Brotli roundtrip fuzz harness
 ├── generate_corpus.c        # Seed corpus generator
 ├── regression/              # Tracked; replayed by `make fuzz-replay`
 ├── corpus/                  # Seed inputs (generated)
@@ -507,7 +526,11 @@ fuzz/
 │   ├── zstd_encoder/        # Plaintext inputs for zstd
 │   ├── zstd_roundtrip/      # Plaintext for zstd roundtrip
 │   ├── zlib_decoder/        # zlib streams (RFC 1950 container)
-│   └── zlib_roundtrip/      # Plaintext for zlib roundtrip
+│   ├── zlib_encoder/        # Plaintext inputs for zlib
+│   ├── zlib_roundtrip/      # Plaintext for zlib roundtrip
+│   ├── brotli_decoder/      # Brotli streams this encoder wrote
+│   ├── brotli_encoder/      # Plaintext inputs for brotli
+│   └── brotli_roundtrip/    # Plaintext for brotli roundtrip
 └── findings/                # AFL++ output (generated)
     ├── decoder/
     │   ├── crashes/         # Crash-inducing inputs
@@ -531,7 +554,11 @@ fuzz/
     ├── zstd_encoder/
     ├── zstd_roundtrip/
     ├── zlib_decoder/
-    └── zlib_roundtrip/
+    ├── zlib_encoder/
+    ├── zlib_roundtrip/
+    ├── brotli_decoder/
+    ├── brotli_encoder/
+    └── brotli_roundtrip/
 ```
 
 ## References
