@@ -46,21 +46,26 @@
 #define BROTLI_CHAIN 128
 #define BROTLI_MIN_MATCH 4
 
-/* The largest distance the distance alphabet can express, which is the top of
- * the last long code's range: with NPOSTFIX and NDIRECT both zero the alphabet
- * is 16 short codes and 48 long ones, two per extra-bit width, so the widths
- * run 1..24 and the last range is [(3 << 24) - 3, (3 << 24) - 3 + (1 << 24)).
+/* Why no distance here can outrun the alphabet.
  *
- * The matcher is clamped to this. It used to be free to return a distance the
- * emitter could not spell, and because an unspellable command fails the whole
- * meta-block rather than that one command, a single far match turned 256KiB of
- * compressible input into a stored block: at lgwin 20 a 250000-byte file went
- * out at 250015 bytes where the same file at lgwin 16 - whose window is too
- * small to find the match at all - went out at 17061. The bound is the format's
- * own, so every window RFC 7932 allows now fits inside it with room to spare
- * (lgwin 24's window is 16777200), and the arms below that still refuse a
- * command are unreachable rather than merely unlikely. */
-#define BROTLI_MAX_DIST (((3u << 24) - 3u) + (1u << 24) - 1u)
+ * With NPOSTFIX and NDIRECT both zero the distance alphabet is 16 short codes
+ * and 48 long ones, two per extra-bit width, so the widths run 1..24 and the
+ * largest distance it can express is ((3 << 24) - 3) + (1 << 24) - 1, which is
+ * 67108860. long_dist_sym used to stop at width 15, which put the ceiling at
+ * 131068 instead - and because a command the emitter cannot spell fails the
+ * whole meta-block rather than that one command, a single far match turned
+ * 256KiB of compressible input into a stored block: at lgwin 20 a 250000-byte
+ * file went out at 250015 bytes where the same file at lgwin 16, whose window
+ * is too small to find the match at all, went out at 17061.
+ *
+ * Two things keep it unreachable now, and either alone would do it. Matches
+ * stay inside the chunk, so a distance is at most BROTLI_BLOCK, 262144. And
+ * the matcher refuses a distance past the window, which at lgwin 24 - the
+ * largest RFC 7932 defines - is 16777200. Both are far under 67108860, which
+ * is why there is no clamp here: one was written, and a test that removed it
+ * could not tell the difference, because nothing a caller can ask for comes
+ * within three orders of magnitude of the bound. If matches are ever let
+ * cross chunks, the window leg still holds. */
 
 typedef struct brotli_canon_s {
   uint16_t code;
@@ -1327,9 +1332,6 @@ int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
   if (!dst || !out_n || !data || !dist_rb || !rb_fresh || len == 0
       || len > 16777216u) {
     return 1;
-  }
-  if (window > BROTLI_MAX_DIST) {
-    window = BROTLI_MAX_DIST;
   }
   stored = len + 3u * ((len + 65535u) / 65536u);
   if (dst_cap < 8) {
