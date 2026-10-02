@@ -1534,16 +1534,17 @@ static void detach(brotli_dec_t * st, gcomp_buffer_t * input) {
   st->br.size = 0;
 }
 
+/* What a caller can still get wrong once the buffers themselves are present.
+ *
+ * A NULL `input` or `output` never arrives here: gcomp_decoder_update and
+ * gcomp_decoder_finish refuse those before dispatching to any method, so the
+ * two arms this used to spell for them - each with its own message - could not
+ * be reached through the public API, and a message nothing can print is a
+ * message nobody can correct. With those gone, finish passes a NULL input and
+ * every check below simply skips it, so the flag that used to say so is gone
+ * too. */
 static int buffers_ok(gcomp_decoder_t * decoder, const gcomp_buffer_t * input,
-    const gcomp_buffer_t * output, int want_input) {
-  if (want_input && !input) {
-    gcomp_decoder_set_error(decoder, GCOMP_ERR_INVALID_ARG, "input is NULL");
-    return 0;
-  }
-  if (!output) {
-    gcomp_decoder_set_error(decoder, GCOMP_ERR_INVALID_ARG, "output is NULL");
-    return 0;
-  }
+    const gcomp_buffer_t * output) {
   if (input && input->used > input->size) {
     gcomp_decoder_set_error(decoder, GCOMP_ERR_INVALID_ARG, "input used exceeds size");
     return 0;
@@ -1637,7 +1638,7 @@ gcomp_status_t brotli_decoder_update(gcomp_decoder_t * decoder,
   if (!decoder || !decoder->method_state) {
     return GCOMP_ERR_INVALID_ARG;
   }
-  if (!buffers_ok(decoder, input, output, 1)) {
+  if (!buffers_ok(decoder, input, output)) {
     return decoder->last_error;
   }
   st = decoder->method_state;
@@ -1660,7 +1661,7 @@ gcomp_status_t brotli_decoder_finish(gcomp_decoder_t * decoder,
   if (!decoder || !decoder->method_state) {
     return GCOMP_ERR_INVALID_ARG;
   }
-  if (!buffers_ok(decoder, NULL, output, 0)) {
+  if (!buffers_ok(decoder, NULL, output)) {
     return decoder->last_error;
   }
   st = decoder->method_state;
