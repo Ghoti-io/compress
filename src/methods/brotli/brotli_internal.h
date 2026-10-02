@@ -124,10 +124,16 @@ int brotli_dict_word(int length, uint64_t word_id, uint8_t * dst, int dst_cap,
  * updated. Returns 1 when the compressed form is not smaller than a stored
  * block, or the block cannot be represented; dist_rb is unchanged and the
  * caller writes the section 11.1 block. Returns -1 on allocation failure.
+ *
+ * rb_fresh is how many distances must still be written as absolute codes
+ * rather than as references into the distance ring buffer. A full flush sets
+ * it to 4, which is every slot the short codes can read; this consumes it as
+ * it writes distances, and leaves it alone when it returns 1, because a
+ * stored block writes no distances and so still owes them.
  */
 int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
     size_t dst_cap, size_t * out_n, const uint8_t * data, size_t len,
-    uint32_t window, uint32_t dist_rb[4]);
+    uint32_t window, uint32_t dist_rb[4], int * rb_fresh);
 
 gcomp_status_t brotli_encoder_init(gcomp_registry_t * registry,
     gcomp_options_t * options, gcomp_encoder_t * encoder);

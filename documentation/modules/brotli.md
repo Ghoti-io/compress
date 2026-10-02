@@ -37,3 +37,5 @@ Unknown keys are refused when the encoder or decoder is created.
 For the default 16-bit window an empty input is the single byte `0x06`: window, `ISLAST`, `ISLASTEMPTY`. A non-empty input opens with `0x0C` (window, then an empty metadata meta-block, which lands the rest of the stream on a byte boundary). Level 0 then writes uncompressed meta-blocks and ends with `0x03`. Level 1 writes a compressed meta-block when it is smaller, and an empty metadata block after it so the next block and the `0x03` terminator stay on a byte boundary.
 
 `gcomp_encoder_flush()` ends the current meta-block and does not write the terminator, so a decoder can produce every byte consumed so far without `finish()`.
+
+`GCOMP_FLUSH_FULL` additionally writes the next four distances as absolute codes rather than as references into the distance ring buffer. A match never reaches outside the chunk it is in, so ending the meta-block is enough to keep matches from crossing the flush; the ring buffer is the one piece of decoder state that does cross it, and four absolute distances refill every slot the short codes can read. It costs a few bits, which is what the mode is documented to cost.

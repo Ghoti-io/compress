@@ -1069,7 +1069,13 @@ done:
   return 0;
 }
 
-static int resolve_cmd(const brotli_cmd_t * cmd, const uint32_t rb[4],
+/* fresh is how many distances must still be spelled absolutely. A full flush
+ * sets it, because the ring buffer is the one piece of decoder state that
+ * survives a meta-block boundary: a short or implicit distance code after the
+ * flush names a distance established before it, which is exactly what
+ * GCOMP_FLUSH_FULL promises will not happen. Four absolute distances refill
+ * every slot the short codes can read, and after that they are safe again. */
+static int resolve_cmd(const brotli_cmd_t * cmd, const uint32_t rb[4], int fresh,
     int imp[24][24], int exp[24][24], int * ic, int * implicit,
     int * dist_sym, uint32_t * ins_extra, int * ins_n, uint32_t * copy_extra,
     int * copy_n, uint32_t * dist_extra, int * dist_n) {
@@ -1096,7 +1102,7 @@ static int resolve_cmd(const brotli_cmd_t * cmd, const uint32_t rb[4],
           copy_n) != 0) {
     return -1;
   }
-  if (ins_code <= 7 && copy_code <= 15 && cmd->dist == rb[0] &&
+  if (!fresh && ins_code <= 7 && copy_code <= 15 && cmd->dist == rb[0] &&
       imp[ins_code][copy_code] >= 0) {
     *implicit = 1;
     *ic = imp[ins_code][copy_code];
@@ -1110,7 +1116,7 @@ static int resolve_cmd(const brotli_cmd_t * cmd, const uint32_t rb[4],
   if (*ic < 0) {
     return -1;
   }
-  if (short_dist_sym(cmd->dist, rb, dist_sym) == 0) {
+  if (!fresh && short_dist_sym(cmd->dist, rb, dist_sym) == 0) {
     *dist_extra = 0;
     *dist_n = 0;
     return 0;
@@ -1211,7 +1217,7 @@ static int literals_cannot_win(const uint32_t lit_freq[256], size_t len) {
 
 static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
     const uint8_t * data, const brotli_cmd_t * cmds, int ncmd, size_t len,
-    uint32_t rb[4]) {
+    uint32_t rb[4], int * fresh) {
   uint32_t lit_freq[256];
   uint32_t ic_freq[704];
   uint32_t dist_freq[64];
@@ -1221,6 +1227,7 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
   int imp[24][24];
   int exp[24][24];
   uint32_t origin[4];
+  int origin_fresh = *fresh;
   int c;
   int i;
   memset(lit_freq, 0, sizeof(lit_freq));
@@ -1238,7 +1245,7 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
     int ins_n = 0;
     int copy_n = 0;
     int dist_n = 0;
-    if (resolve_cmd(&cmds[c], rb, imp, exp, &ic, &implicit, &dist_sym,
+    if (resolve_cmd(&cmds[c], rb, *fresh, imp, exp, &ic, &implicit, &dist_sym,
             &ins_extra, &ins_n, &copy_extra, &copy_n, &dist_extra,
             &dist_n) != 0) {
       return -1;
@@ -1257,6 +1264,9 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
       dist_freq[dist_sym]++;
       if (dist_sym != 0) {
         push_dist(rb, cmds[c].dist);
+      }
+      if (*fresh > 0) {
+        (*fresh)--;
       }
     }
   }
@@ -1281,6 +1291,7 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
     return -1;
   }
   memcpy(rb, origin, sizeof(origin));
+  *fresh = origin_fresh;
   for (c = 0; c < ncmd; c++) {
     int ic = 0;
     int implicit = 0;
@@ -1291,7 +1302,7 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
     int ins_n = 0;
     int copy_n = 0;
     int dist_n = 0;
-    if (resolve_cmd(&cmds[c], rb, imp, exp, &ic, &implicit, &dist_sym,
+    if (resolve_cmd(&cmds[c], rb, *fresh, imp, exp, &ic, &implicit, &dist_sym,
             &ins_extra, &ins_n, &copy_extra, &copy_n, &dist_extra,
             &dist_n) != 0) {
       gcomp_free(alloc, lit_code);
@@ -1326,6 +1337,9 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
       if (dist_sym != 0) {
         push_dist(rb, cmds[c].dist);
       }
+      if (*fresh > 0) {
+        (*fresh)--;
+      }
     }
   }
   gcomp_free(alloc, lit_code);
@@ -1336,14 +1350,16 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
 
 int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
     size_t dst_cap, size_t * out_n, const uint8_t * data, size_t len,
-    uint32_t window, uint32_t dist_rb[4]) {
+    uint32_t window, uint32_t dist_rb[4], int * rb_fresh) {
   brotli_cmd_t * cmds = NULL;
   brotli_bw_t bw;
   uint32_t rb[4];
+  int fresh;
   size_t stored;
   int ncmd = 0;
   int pr;
-  if (!dst || !out_n || !data || !dist_rb || len == 0 || len > 16777216u) {
+  if (!dst || !out_n || !data || !dist_rb || !rb_fresh || len == 0
+      || len > 16777216u) {
     return 1;
   }
   if (window > BROTLI_MAX_DIST) {
@@ -1361,6 +1377,7 @@ int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
   bw.buf = dst;
   bw.cap = dst_cap < stored ? dst_cap : stored;
   memcpy(rb, dist_rb, sizeof(rb));
+  fresh = *rb_fresh;
   if (write_mlen(&bw, len) != 0 || bw_put(&bw, 0, 1) != 0 ||
       bw_put(&bw, 0, 1) != 0 || bw_put(&bw, 0, 1) != 0 ||
       bw_put(&bw, 0, 2) != 0 || bw_put(&bw, 0, 4) != 0 ||
@@ -1369,7 +1386,7 @@ int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
     gcomp_free(alloc, cmds);
     return 1;
   }
-  if (emit_block(alloc, &bw, data, cmds, ncmd, len, rb) != 0) {
+  if (emit_block(alloc, &bw, data, cmds, ncmd, len, rb, &fresh) != 0) {
     gcomp_free(alloc, cmds);
     return 1;
   }
@@ -1378,6 +1395,7 @@ int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
     return 1;
   }
   memcpy(dist_rb, rb, sizeof(rb));
+  *rb_fresh = fresh;
   *out_n = bw.len;
   return 0;
 }

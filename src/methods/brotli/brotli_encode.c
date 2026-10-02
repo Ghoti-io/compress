@@ -66,6 +66,7 @@ typedef struct brotli_enc_s {
   int started;
   int finished;
   uint32_t dist_rb[4];
+  int rb_fresh;
   uint8_t * hold;
   size_t hold_len;
   size_t hold_cap;
@@ -77,11 +78,15 @@ typedef struct brotli_enc_s {
   size_t q_pos;
 } brotli_enc_t;
 
+/* The ring buffer a decoder starts with, newest first. Nothing is owed at the
+ * start of a stream: a decoder reading from here has exactly these four
+ * values, so a short distance code is as good as an absolute one. */
 static void reset_dist(brotli_enc_t * st) {
   st->dist_rb[0] = 4;
   st->dist_rb[1] = 11;
   st->dist_rb[2] = 15;
   st->dist_rb[3] = 16;
+  st->rb_fresh = 0;
 }
 
 static int bw_put(brotli_bw_t * b, uint32_t bits, int n) {
@@ -203,7 +208,7 @@ static int write_chunk(brotli_enc_t * st) {
   }
   window = (1u << st->lgwin) - 16u;
   r = brotli_compress_chunk(st->alloc, st->scratch, st->scratch_cap, &n,
-      st->hold, st->hold_len, window, st->dist_rb);
+      st->hold, st->hold_len, window, st->dist_rb, &st->rb_fresh);
   if (r < 0) {
     return -2;
   }
@@ -431,12 +436,28 @@ gcomp_status_t brotli_encoder_finish(gcomp_encoder_t * encoder,
   return GCOMP_OK;
 }
 
+/**
+ * Both modes end the current meta-block, which is all a sync flush is: level 1
+ * never matches outside the chunk it is compressing, so no match can reach
+ * back across a flush of either kind.
+ *
+ * A full flush owes one thing more. The distance ring buffer is the only
+ * decoder state that survives a meta-block boundary, so a short or implicit
+ * distance code after the flush names a distance established before it - and
+ * a decoder that lost the earlier bytes resolves that code against a
+ * different ring buffer and produces the wrong output, silently. The mode used
+ * to be ignored outright, which made both modes write identical bytes and left
+ * that hole open. `rb_fresh` closes it by making the next four distances
+ * absolute, which is every slot the short codes can read.
+ *
+ * It is set on every path rather than only after a block is emitted, because
+ * an output buffer too small to drain makes the caller flush again with the
+ * same mode, and that second call has nothing buffered left to emit.
+ */
 gcomp_status_t brotli_encoder_flush(gcomp_encoder_t * encoder,
     gcomp_buffer_t * output, gcomp_flush_t mode) {
   brotli_enc_t * st;
-  gcomp_status_t chk;
-  (void)mode;
-  chk = output_ok(encoder, output);
+  gcomp_status_t chk = output_ok(encoder, output);
   if (chk != GCOMP_OK) {
     return chk;
   }
@@ -452,19 +473,21 @@ gcomp_status_t brotli_encoder_flush(gcomp_encoder_t * encoder,
   if (st->q_len != 0) {
     return GCOMP_ERR_LIMIT;
   }
-  if (st->hold_len == 0) {
-    return GCOMP_OK;
-  }
-  if (!st->started) {
-    if (write_header(st) != 0) {
-      return gcomp_encoder_set_error(encoder, GCOMP_ERR_INTERNAL,
-          "brotli: header did not fit the output queue");
+  if (st->hold_len != 0) {
+    if (!st->started) {
+      if (write_header(st) != 0) {
+        return gcomp_encoder_set_error(encoder, GCOMP_ERR_INTERNAL,
+            "brotli: header did not fit the output queue");
+      }
+      st->started = 1;
     }
-    st->started = 1;
+    chk = emit_hold(encoder, st);
+    if (chk != GCOMP_OK) {
+      return chk;
+    }
   }
-  chk = emit_hold(encoder, st);
-  if (chk != GCOMP_OK) {
-    return chk;
+  if (mode == GCOMP_FLUSH_FULL) {
+    st->rb_fresh = 4;
   }
   drain(st, output);
   if (st->q_len != 0) {

@@ -299,6 +299,151 @@ TEST(Brotli, LevelOneRoundTripsTextAndNoise) {
   EXPECT_LT(comp.size(), stored.size() / 2);
 }
 
+namespace {
+
+/// A block of noise repeated three times: its only compression is a match at
+/// `period`, which is the distance the test wants to control.
+std::vector<uint8_t> PeriodicNoise(size_t period, unsigned seed) {
+  std::vector<uint8_t> one(period);
+  test_helpers_generate_random(one.data(), one.size(), seed);
+  std::vector<uint8_t> all;
+  for (int i = 0; i < 3; i++) {
+    all.insert(all.end(), one.begin(), one.end());
+  }
+  return all;
+}
+
+/// Encode `pre`, flush with `mode`, encode `post`, finish. Returns the whole
+/// stream and reports how many bytes were emitted after the flush point.
+std::vector<uint8_t> EncodeAcrossFlush(const std::vector<uint8_t> & pre,
+    const std::vector<uint8_t> & post, gcomp_flush_t mode, size_t * after) {
+  gcomp_encoder_t * enc = nullptr;
+  gcomp_options_t * opts = lgwin_options(16, 1);
+  EXPECT_EQ(
+      gcomp_encoder_create(gcomp_registry_default(), "brotli", opts, &enc),
+      GCOMP_OK);
+  gcomp_options_destroy(opts);
+  std::vector<uint8_t> stream(pre.size() + post.size() + 4096);
+  size_t len = 0;
+  const std::vector<uint8_t> * phases[2] = {&pre, &post};
+  size_t mark = 0;
+  for (int phase = 0; phase < 2; phase++) {
+    gcomp_buffer_t in = {phases[phase]->data(), phases[phase]->size(), 0};
+    while (in.used < in.size) {
+      gcomp_buffer_t ob = {stream.data() + len, stream.size() - len, 0};
+      EXPECT_EQ(gcomp_encoder_update(enc, &in, &ob), GCOMP_OK);
+      len += ob.used;
+    }
+    if (phase == 0) {
+      for (;;) {
+        gcomp_buffer_t ob = {stream.data() + len, stream.size() - len, 0};
+        gcomp_status_t s = gcomp_encoder_flush(enc, &ob, mode);
+        len += ob.used;
+        if (s == GCOMP_OK) {
+          break;
+        }
+        EXPECT_EQ(s, GCOMP_ERR_LIMIT);
+        if (s != GCOMP_ERR_LIMIT) {
+          break;
+        }
+      }
+      mark = len;
+    }
+  }
+  for (;;) {
+    gcomp_buffer_t ob = {stream.data() + len, stream.size() - len, 0};
+    gcomp_status_t s = gcomp_encoder_finish(enc, &ob);
+    len += ob.used;
+    if (s == GCOMP_OK) {
+      break;
+    }
+    EXPECT_EQ(s, GCOMP_ERR_LIMIT);
+    if (s != GCOMP_ERR_LIMIT) {
+      break;
+    }
+  }
+  gcomp_encoder_destroy(enc);
+  stream.resize(len);
+  *after = len - mark;
+  return stream;
+}
+
+} // namespace
+
+/**
+ * `GCOMP_FLUSH_FULL` promises that nothing written after the flush refers to
+ * anything written before it. A match cannot: level 1 never looks outside the
+ * chunk it is compressing. The distance ring buffer can, and did - it is the
+ * one piece of decoder state that survives a meta-block boundary, and the mode
+ * was ignored outright, so a short or implicit distance code after the flush
+ * named a distance established before it. A decoder that lost the earlier
+ * bytes resolves that code against a different ring buffer and produces the
+ * wrong output with no error.
+ *
+ * The instrument: identical data after the flush, and only the data before it
+ * varies. The variants are chosen so the pre-flush last distance is sometimes
+ * exactly the distance the post-flush block wants (700), sometimes one away
+ * from it (701, which short code 4 reaches), and sometimes nowhere near. Under
+ * a full flush every variant has to produce the same number of post-flush
+ * bytes. Under a sync flush they must not all agree - that is the control,
+ * without which the full-flush assertion would pass on an input that could
+ * never have exposed the dependency in the first place.
+ */
+TEST(Brotli, AFullFlushLeavesNothingToReferBackTo) {
+  const std::vector<uint8_t> post = PeriodicNoise(700, 41);
+  const size_t pre_periods[] = {700, 701, 123, 4096};
+
+  std::vector<size_t> full_sizes;
+  std::vector<size_t> sync_sizes;
+  for (size_t i = 0; i < 4; i++) {
+    const std::vector<uint8_t> pre =
+        PeriodicNoise(pre_periods[i], (unsigned)(60 + i));
+    std::vector<uint8_t> whole = pre;
+    whole.insert(whole.end(), post.begin(), post.end());
+
+    for (gcomp_flush_t mode : {GCOMP_FLUSH_SYNC, GCOMP_FLUSH_FULL}) {
+      size_t after = 0;
+      std::vector<uint8_t> stream = EncodeAcrossFlush(pre, post, mode, &after);
+      ASSERT_GT(after, 0u);
+      (mode == GCOMP_FLUSH_FULL ? full_sizes : sync_sizes).push_back(after);
+
+      std::vector<uint8_t> dec =
+          decode_bytes(stream.data(), stream.size(), whole.size() + 8);
+      ASSERT_EQ(dec, whole) << "period " << pre_periods[i] << " mode "
+                            << (int)mode;
+      const BrotliLib & lib = brotli_lib();
+      if (lib.ok()) {
+        std::vector<uint8_t> out(whole.size() + 8);
+        size_t written = out.size();
+        ASSERT_EQ(
+            lib.decompress(stream.size(), stream.data(), &written, out.data()),
+            1)
+            << pre_periods[i];
+        ASSERT_EQ(written, whole.size()) << pre_periods[i];
+        EXPECT_EQ(memcmp(out.data(), whole.data(), whole.size()), 0)
+            << pre_periods[i];
+      }
+    }
+  }
+
+  for (size_t i = 1; i < full_sizes.size(); i++) {
+    EXPECT_EQ(full_sizes[i], full_sizes[0])
+        << "the bytes after a full flush changed with the data before it, so "
+           "something after the flush referred back across it (pre-flush "
+           "period "
+        << pre_periods[i] << ")";
+  }
+
+  bool sync_varies = false;
+  for (size_t i = 1; i < sync_sizes.size(); i++) {
+    sync_varies = sync_varies || sync_sizes[i] != sync_sizes[0];
+  }
+  EXPECT_TRUE(sync_varies)
+      << "a sync flush kept the ring buffer and still produced the same "
+         "post-flush size for every pre-flush variant, so this input cannot "
+         "tell the two modes apart and the assertion above proves nothing";
+}
+
 TEST(Brotli, RoundTrip) {
   std::vector<uint8_t> data(1000);
   test_helpers_generate_random(data.data(), data.size(), 7);
