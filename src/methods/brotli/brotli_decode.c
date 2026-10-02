@@ -757,6 +757,28 @@ static int read_tree_array(brotli_dec_t * st, brotli_huff_t * arr, int n,
   }
 }
 
+/**
+ * The three block-type categories of RFC 7932 section 9.2: literals, then
+ * insert-and-copy, then distances. Each one declares how many block types it
+ * has, and a category with two or more carries a prefix code for the type, a
+ * prefix code for the block count, and - the part this used to skip - the
+ * count for its *first* block, read with that second code.
+ *
+ * Skipping it was invisible for as long as nothing produced more than one
+ * block type. `begin_meta` sets every block count to 16777216, which is larger
+ * than any meta-block, so `take_block` never reaches zero and never reads a
+ * switch; with one block type that is exactly right and the sentinel is the
+ * whole story. With two or more it is not: the bits for the initial count are
+ * in the stream whether or not anything reads them, so every field after them
+ * was read from the wrong bit position. The first symptom was a block-type
+ * count of 162 for the insert-and-copy category and then a prefix code that
+ * could not be built.
+ *
+ * libbrotli emits more than one block type from quality 4 upward on input
+ * heterogeneous enough to be worth splitting, so this rejected a large part of
+ * what the reference encoder produces - including every quality from 4 to 9 on
+ * 24000 bytes of noise followed by markup.
+ */
 static int read_categories(brotli_dec_t * st) {
   for (;;) {
     int value = 0;
@@ -800,8 +822,44 @@ static int read_categories(brotli_dec_t * st) {
         return r;
       }
       st->tree_ready = 0;
+      st->csub = 4;
+      break;
+    case 4: {
+      int sym = 0;
+      r = brotli_read_sym(&st->br, &st->ht_len[st->cat_i], &st->sym, &sym);
+      if (r == BR_FAIL) {
+        return dec_fail(
+            st, GCOMP_ERR_CORRUPT, "brotli: bad first block-count code");
+      }
+      if (r != BR_OK) {
+        return r;
+      }
+      if (sym < 0 || sym > 25) {
+        return dec_fail(
+            st, GCOMP_ERR_CORRUPT, "brotli: bad first block-count symbol");
+      }
+      st->tmp = sym;
+      st->csub = 5;
+      break;
+    }
+    case 5: {
+      uint32_t bits = 0;
+      r = brotli_bits_take(&st->br, k_blk_extra[st->tmp], &bits);
+      if (r != BR_OK) {
+        return r;
+      }
+      /* No decrement here, unlike take_block's: that one is serving the
+       * element it just switched for, and nothing has been read from this
+       * block yet. The first take_block call takes the count down to the
+       * right place. */
+      st->blen[st->cat_i] = k_blk_base[st->tmp] + bits;
+      if (st->blen[st->cat_i] == 0) {
+        return dec_fail(
+            st, GCOMP_ERR_CORRUPT, "brotli: empty first block count");
+      }
       st->csub = 3;
       break;
+    }
     case 3:
       st->cat_i++;
       st->csub = 0;

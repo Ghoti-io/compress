@@ -767,6 +767,54 @@ std::vector<OracleCase> OracleCases() {
 } // namespace
 
 /**
+ * libbrotli's bytes, read by us, at every quality it offers and on input it
+ * has reason to split into more than one block type.
+ *
+ * `ReadsLibbrotliStreams` swept qualities 0, 5 and 11 over four small inputs
+ * and passed throughout, while the decoder could not read *any* stream with
+ * two or more block types: RFC 7932 has each such category carry the count of
+ * its first block, and the decoder never read those bits, so every field after
+ * them came from the wrong bit position. What hid it was the inputs - a 43-byte
+ * sentence, a thousand zeros, two hundred random bytes and eight thousand
+ * sequential ones give libbrotli no reason to split anything.
+ *
+ * Noise followed by markup does. Qualities 4 through 9 produced streams this
+ * refused with "bad code-length code", after reading a block-type count of 162
+ * for the insert-and-copy category. The sweep is per quality because that is
+ * the axis the defect lived on: 0 to 3 and 10 to 11 were fine on this input
+ * and would have gone on being fine.
+ */
+TEST(Brotli, EveryLibbrotliQualityIsReadIncludingTheBlockSplittingOnes) {
+  const BrotliLib & lib = brotli_lib();
+  if (!lib.ok()) {
+    GTEST_SKIP() << "libbrotli is not installed";
+  }
+  const char * markup =
+      "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+      "<title>index</title></head><body><div class=\"content\">"
+      "<a href=\"https://example.com/index.html\">link</a></div>"
+      "<script src=\"/static/app.js\"></script></body></html>";
+  std::vector<uint8_t> data(24000);
+  test_helpers_generate_random(data.data(), 12000, 5);
+  for (size_t i = 12000; i < data.size(); i++) {
+    data[i] = (uint8_t)markup[(i - 12000) % strlen(markup)];
+  }
+
+  for (int quality = 0; quality <= 11; quality++) {
+    for (int lgwin : {16, 22}) {
+      std::vector<uint8_t> enc =
+          lib_compress(data.data(), data.size(), quality, lgwin);
+      ASSERT_FALSE(enc.empty()) << "q" << quality << " lgwin " << lgwin;
+      std::vector<uint8_t> dec =
+          decode_bytes(enc.data(), enc.size(), data.size() + 64);
+      ASSERT_EQ(dec.size(), data.size()) << "q" << quality << " lgwin " << lgwin;
+      EXPECT_EQ(memcmp(dec.data(), data.data(), data.size()), 0)
+          << "q" << quality << " lgwin " << lgwin;
+    }
+  }
+}
+
+/**
  * Our bytes, read by libbrotli.
  *
  * This is the only test that says our encoder writes RFC 7932 rather than
