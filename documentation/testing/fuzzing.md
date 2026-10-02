@@ -260,8 +260,11 @@ make fuzz-brotli-roundtrip
 The decoder harness reads arbitrary bytes. `make fuzz-corpus` seeds it with
 streams this encoder wrote. The harness caps the window at `1 << 22` and the
 expansion ratio at 4096, so a mutated window of 23 or 24 is refused rather
-than allocated. The encoder harness writes whatever `brotli.level` defaults
-to: LZ77 and Huffman, or a stored meta-block when that is smaller. The
+than allocated. The encoder harness takes `brotli.level` from the input's
+second byte, so both the LZ77 and Huffman block and the section 11.1 store get
+driven; it used to set neither and so drove whichever level was the default,
+which meant level 0 lost its fuzzing the moment level 1 became that default.
+An input too short to carry the byte gets the default. The
 roundtrip harness aborts if a stream this encoder just wrote does not decode
 back to the input.
 

@@ -28,6 +28,8 @@
 #include <string>
 #include <vector>
 
+#include "methods/brotli/brotli_internal.h"
+
 namespace {
 
 gcomp_options_t * lgwin_options(int lgwin, int level) {
@@ -626,23 +628,248 @@ TEST(Brotli, LibbrotliIsActuallyAvailable) {
          "machine that has no libbrotli.";
 }
 
+namespace {
+
+/// One input, and the level-1 construct it is here to put in front of the
+/// reference decoder.
+struct OracleCase {
+  const char * what;
+  std::vector<uint8_t> data;
+};
+
+/// Literal frequencies that fall off like a Fibonacci sequence, so the
+/// optimal Huffman tree is as deep as an alphabet of this size can make it.
+std::vector<uint8_t> SkewedAlphabet(size_t n) {
+  std::vector<uint8_t> data;
+  data.reserve(n);
+  uint64_t f1 = 1;
+  uint64_t f2 = 1;
+  for (int sym = 0; sym < 24 && data.size() < n; sym++) {
+    const uint64_t count = f1;
+    f1 = f2;
+    f2 = count + f2;
+    for (uint64_t i = 0; i < count && data.size() < n; i++) {
+      data.push_back((uint8_t)(sym + 1));
+    }
+  }
+  while (data.size() < n) {
+    data.push_back(25);
+  }
+  // Shuffled deterministically: the frequencies are what matter, and a sorted
+  // buffer would collapse into one long match and encode no literals at all.
+  std::vector<uint8_t> noise(data.size() * 2);
+  test_helpers_generate_random(noise.data(), noise.size(), 71);
+  for (size_t i = 0; i < data.size(); i++) {
+    const size_t j =
+        (size_t)(noise[2 * i] | (noise[2 * i + 1] << 8)) % data.size();
+    std::swap(data[i], data[j]);
+  }
+  return data;
+}
+
+std::vector<OracleCase> OracleCases() {
+  std::vector<OracleCase> cases;
+
+  // One literal symbol, so every prefix code in the block is the single-symbol
+  // form that carries no lengths at all.
+  cases.push_back({"one byte repeated", std::vector<uint8_t>(8000, 'a')});
+
+  // One long match, two literal symbols: the shape the sweep used to be.
+  std::vector<uint8_t> repeat(4000);
+  test_helpers_generate_pattern(repeat.data(), repeat.size(),
+      reinterpret_cast<const uint8_t *>("brotli"), 6);
+  cases.push_back({"a repeated six-byte pattern", repeat});
+
+  // A wide literal alphabet, so the literal code is a complex prefix code
+  // with real depth rather than a handful of symbols.
+  std::vector<uint8_t> text;
+  const char * phrase =
+      "The quick brown fox jumps over the lazy dog, and then (0x2A!) "
+      "writes 12,345 bytes of mixed-case prose with punctuation. ";
+  while (text.size() < 40000) {
+    text.insert(text.end(), phrase, phrase + strlen(phrase));
+  }
+  text.resize(40000);
+  cases.push_back({"prose with a wide literal alphabet", text});
+
+  // Every byte value, so the literal alphabet is the whole 256 symbols.
+  std::vector<uint8_t> all(2048);
+  for (size_t i = 0; i < 256; i++) {
+    all[i] = (uint8_t)i;
+  }
+  for (size_t i = 256; i < all.size(); i++) {
+    all[i] = all[i - 256];
+  }
+  cases.push_back({"all 256 literal values", all});
+
+  // Deep enough to exceed the fifteen-bit limit a Brotli prefix code has, so
+  // the length-limited fallback is what writes the code.
+  cases.push_back({"a Fibonacci-skewed alphabet", SkewedAlphabet(200000)});
+
+  // Two, three and four distinct literals are the three simple prefix codes,
+  // and the symbols are deliberately not in increasing byte order, which is
+  // the part a canonical code has to get right.
+  static const char * sets[] = {"\xff\x01", "\xff\x01\x80", "\xff\x01\x80\x40"};
+  for (int s = 0; s < 3; s++) {
+    const size_t distinct = (size_t)s + 2;
+    std::vector<uint8_t> few(40000);
+    for (size_t i = 0; i < few.size(); i++) {
+      few[i] = (uint8_t)sets[s][(i * 7 + i / 13) % distinct];
+    }
+    cases.push_back(
+        {distinct == 2 ? "two distinct literals, descending"
+                       : (distinct == 3 ? "three distinct literals, descending"
+                                        : "four distinct literals, descending"),
+            few});
+  }
+
+  // A block that compresses, then bytes that cannot match: the last command
+  // is insert-only, whose copy length and distance the format says to ignore
+  // once the meta-block length is satisfied. Getting that wrong writes a
+  // distance the decoder does not read, and the stream desyncs.
+  std::vector<uint8_t> tail(60005);
+  for (size_t i = 0; i < 60000; i++) {
+    tail[i] = (uint8_t)"abcdefgh"[i % 8];
+  }
+  for (size_t i = 0; i < 5; i++) {
+    tail[60000 + i] = (uint8_t)(0x90 + i * 7);
+  }
+  cases.push_back({"a compressible block with an insert-only tail", tail});
+
+  // Incompressible, so the chunk is stored rather than Huffman-coded.
+  std::vector<uint8_t> noise(50000);
+  test_helpers_generate_random(noise.data(), noise.size(), 29);
+  cases.push_back({"noise, which falls back to a stored block", noise});
+
+  // Past one chunk, so the stream is several meta-blocks and the distance
+  // ring buffer has to survive the boundaries.
+  std::vector<uint8_t> many(600000);
+  for (size_t i = 0; i < many.size(); i++) {
+    many[i] = (uint8_t)("lorem ipsum dolor sit amet "[i % 27]);
+  }
+  cases.push_back({"more than one chunk", many});
+
+  // A match further back than the distance alphabet's widths used to reach,
+  // which is only offered to the matcher at lgwin 18 and above.
+  std::vector<uint8_t> far(250000);
+  for (size_t i = 0; i < far.size(); i++) {
+    far[i] = (uint8_t)("lorem ipsum dolor sit amet consectetur "[i % 39]);
+  }
+  std::vector<uint8_t> block(8192);
+  test_helpers_generate_random(block.data(), block.size(), 23);
+  memcpy(far.data(), block.data(), block.size());
+  memcpy(far.data() + 232000, block.data(), block.size());
+  cases.push_back({"a match 232000 bytes back", far});
+
+  return cases;
+}
+
+} // namespace
+
+/**
+ * Our bytes, read by libbrotli.
+ *
+ * This is the only test that says our encoder writes RFC 7932 rather than
+ * something only our own decoder happens to agree with, so it has to carry
+ * every construct level 1 can emit. It used to hand over two inputs - 8000
+ * copies of one byte and a repeated six-byte pattern - which between them
+ * reached one long match and at most six literal symbols. The complex prefix
+ * code, the fifteen-bit length limit, the three simple codes' symbol order and
+ * the insert-only final command were all checked against our own decoder only,
+ * which is no check at all if the two agree about the same mistake.
+ */
 TEST(Brotli, LibbrotliReadsOurStreams) {
   const BrotliLib & lib = brotli_lib();
   if (!lib.ok()) {
     GTEST_SKIP() << "libbrotli is not installed";
   }
-  std::vector<uint8_t> data(4000);
-  test_helpers_generate_pattern(data.data(), data.size(),
-      reinterpret_cast<const uint8_t *>("brotli"), 6);
-  for (int lgwin : {16, 22}) {
-    std::vector<uint8_t> enc = encode_bytes(data.data(), data.size(), lgwin);
-    std::vector<uint8_t> out(data.size() + 8);
-    size_t written = out.size();
-    ASSERT_EQ(lib.decompress(enc.size(), enc.data(), &written, out.data()), 1)
-        << lgwin;
-    ASSERT_EQ(written, data.size());
-    EXPECT_EQ(memcmp(out.data(), data.data(), data.size()), 0);
+  for (const OracleCase & c : OracleCases()) {
+    for (int lgwin : {16, 22}) {
+      std::vector<uint8_t> enc =
+          encode_bytes(c.data.data(), c.data.size(), lgwin);
+      ASSERT_FALSE(enc.empty()) << c.what << " lgwin " << lgwin;
+      std::vector<uint8_t> out(c.data.size() + 64);
+      size_t written = out.size();
+      ASSERT_EQ(lib.decompress(enc.size(), enc.data(), &written, out.data()), 1)
+          << c.what << " lgwin " << lgwin;
+      ASSERT_EQ(written, c.data.size()) << c.what << " lgwin " << lgwin;
+      EXPECT_EQ(memcmp(out.data(), c.data.data(), c.data.size()), 0)
+          << c.what << " lgwin " << lgwin;
+    }
   }
+}
+
+/**
+ * Every one of the 121 word transformations, against libbrotli's own.
+ *
+ * The decoder's transforms were reached only by whatever words the handful of
+ * quality-11 streams in `ReadsLibbrotliStreams` happened to use, which left
+ * most of the prefix, suffix, ferment and omit arms untaken - `brotli_dict.c`
+ * was the least covered file in the library. libbrotli exports the transform
+ * it applies, so the whole table can be asked directly rather than hoped for.
+ * Both sides are given the same word, so what is compared is the transform and
+ * not the dictionary, which the round trips already agree about.
+ */
+TEST(Brotli, EveryWordTransformMatchesLibbrotli) {
+  void * common = dlopen("libbrotlicommon.so.1", RTLD_NOW);
+  using GetTransforms = const void * (*)();
+  using TransformWord = int (*)(uint8_t *, const uint8_t *, int, const void *,
+      int);
+  GetTransforms get = nullptr;
+  TransformWord apply = nullptr;
+  if (common) {
+    get = reinterpret_cast<GetTransforms>(
+        dlsym(common, "BrotliGetTransforms"));
+    apply = reinterpret_cast<TransformWord>(
+        dlsym(common, "BrotliTransformDictionaryWord"));
+  }
+  if (!get || !apply) {
+    GTEST_SKIP() << "libbrotlicommon.so.1 does not export its transforms";
+  }
+  const void * transforms = get();
+  const uint8_t * dict = brotli_dict_data();
+  const uint32_t * offsets = brotli_dict_offset();
+  const uint8_t * ndbits = brotli_dict_ndbits();
+
+  size_t compared = 0;
+  for (int len = 4; len <= 24; len++) {
+    const uint32_t words = 1u << ndbits[len];
+    // First, last, and one in the middle of each length class.
+    const uint32_t picks[3] = {0, words / 2, words - 1};
+    for (uint32_t pick : picks) {
+      const uint8_t * word = dict + offsets[len] + pick * (uint32_t)len;
+      for (int t = 0; t <= 120; t++) {
+        uint8_t ours[128];
+        uint8_t theirs[128];
+        int ours_len = 0;
+        memset(ours, 0, sizeof(ours));
+        memset(theirs, 0, sizeof(theirs));
+        const uint64_t word_id = (uint64_t)t * words + pick;
+        ASSERT_EQ(brotli_dict_word(len, word_id, ours, (int)sizeof(ours),
+                      &ours_len),
+            0)
+            << "len " << len << " word " << pick << " transform " << t;
+        // Zero is a real answer, not a failure: an omit transform that cuts
+        // more characters than a four-byte word has leaves nothing, and with
+        // no prefix or suffix the transformed word is empty. libbrotli
+        // reports 0 for those, and so does this.
+        const int theirs_len = apply(theirs, word, len, transforms, t);
+        ASSERT_GE(theirs_len, 0) << "len " << len << " transform " << t;
+        EXPECT_EQ(ours_len, theirs_len)
+            << "len " << len << " word " << pick << " transform " << t;
+        if (ours_len == theirs_len && ours_len > 0) {
+          EXPECT_EQ(memcmp(ours, theirs, (size_t)ours_len), 0)
+              << "len " << len << " word " << pick << " transform " << t
+              << ": '" << std::string((const char *)ours, (size_t)ours_len)
+              << "' against '"
+              << std::string((const char *)theirs, (size_t)theirs_len) << "'";
+        }
+        compared++;
+      }
+    }
+  }
+  EXPECT_EQ(compared, 21u * 3u * 121u);
+  dlclose(common);
 }
 
 TEST(Brotli, ReadsLibbrotliStreams) {

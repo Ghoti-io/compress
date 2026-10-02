@@ -64,19 +64,29 @@ static int64_t window_from(const uint8_t * input, size_t input_size) {
   return (int64_t)(10 + (n % 15));
 }
 
-static gcomp_options_t * encoder_options(int64_t lgwin) {
+/* A second byte, so the level varies independently of the window. The harness
+ * used to set neither and so drove whichever level was the default, which
+ * meant level 0's stored layout lost its fuzzing the moment level 1 became the
+ * default rather than gaining any. An input too short to carry the byte gets
+ * the default, so the shortest cases still exercise what a caller sees. */
+static int64_t level_from(const uint8_t * input, size_t input_size) {
+  return input_size < 2 ? 1 : (int64_t)(input[1] & 1u);
+}
+
+static gcomp_options_t * encoder_options(int64_t lgwin, int64_t level) {
   gcomp_options_t * opts = NULL;
   gcomp_options_create(&opts);
   if (opts) {
     gcomp_options_set_int64(opts, "brotli.lgwin", lgwin);
+    gcomp_options_set_int64(opts, "brotli.level", level);
   }
   return opts;
 }
 
 static void fuzz_encoder_buffer(const uint8_t * input, size_t input_size,
-    uint8_t * output, int64_t lgwin) {
+    uint8_t * output, int64_t lgwin, int64_t level) {
   size_t output_size = OUTPUT_BUFFER_SIZE;
-  gcomp_options_t * opts = encoder_options(lgwin);
+  gcomp_options_t * opts = encoder_options(lgwin, level);
   gcomp_encode_buffer(registry, "brotli", opts, input, input_size, output,
       output_size, &output_size);
   if (opts) {
@@ -85,9 +95,9 @@ static void fuzz_encoder_buffer(const uint8_t * input, size_t input_size,
 }
 
 static void fuzz_encoder_streaming(const uint8_t * input, size_t input_size,
-    uint8_t * output, int64_t lgwin) {
+    uint8_t * output, int64_t lgwin, int64_t level) {
   gcomp_encoder_t * encoder = NULL;
-  gcomp_options_t * opts = encoder_options(lgwin);
+  gcomp_options_t * opts = encoder_options(lgwin, level);
   gcomp_status_t status =
       gcomp_encoder_create(registry, "brotli", opts, &encoder);
   if (opts) {
@@ -166,8 +176,9 @@ int main(GCOMP_MAYBE_UNUSED(int argc), GCOMP_MAYBE_UNUSED(char ** argv)) {
   }
 
   int64_t lgwin = window_from(input, input_size);
-  fuzz_encoder_streaming(input, input_size, output, lgwin);
-  fuzz_encoder_buffer(input, input_size, output, lgwin);
+  int64_t level = level_from(input, input_size);
+  fuzz_encoder_streaming(input, input_size, output, lgwin, level);
+  fuzz_encoder_buffer(input, input_size, output, lgwin, level);
 
   free(output);
   free(input);

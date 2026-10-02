@@ -39,6 +39,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define BROTLI_DICT_SIZE 122784
 #define BROTLI_MAX_ALPHABET 704
 #define BROTLI_WINDOW_MAX_BITS 24
@@ -154,5 +158,9 @@ gcomp_status_t brotli_decoder_update(gcomp_decoder_t * decoder,
 gcomp_status_t brotli_decoder_finish(gcomp_decoder_t * decoder,
     gcomp_buffer_t * output);
 gcomp_status_t brotli_decoder_reset(gcomp_decoder_t * decoder);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* GHOTI_IO_GCOMP_SRC_METHODS_BROTLI_BROTLI_INTERNAL_H */
