@@ -116,6 +116,19 @@ int brotli_read_sym(brotli_bits_t * bits, const brotli_huff_t * h,
 int brotli_dict_word(int length, uint64_t word_id, uint8_t * dst, int dst_cap,
     int * out_len);
 
+/**
+ * @brief Write one compressed meta-block, or ask the caller to store it.
+ *
+ * Returns 0 when dst holds a compressed meta-block followed by an empty
+ * metadata block (so the stream is back on a byte boundary) and dist_rb is
+ * updated. Returns 1 when the compressed form is not smaller than a stored
+ * block, or the block cannot be represented; dist_rb is unchanged and the
+ * caller writes the section 11.1 block. Returns -1 on allocation failure.
+ */
+int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
+    size_t dst_cap, size_t * out_n, const uint8_t * data, size_t len,
+    uint32_t window, uint32_t dist_rb[4]);
+
 gcomp_status_t brotli_encoder_init(gcomp_registry_t * registry,
     gcomp_options_t * options, gcomp_encoder_t * encoder);
 void brotli_encoder_destroy(gcomp_encoder_t * encoder);

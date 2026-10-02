@@ -563,7 +563,8 @@ compress/
 │   └── methods/                  # Compression method implementations
 │       ├── brotli/
 │       │   ├── brotli_decode.c   # RFC 7932 decoder
-│       │   ├── brotli_encode.c   # Section 11.1 uncompressed meta-blocks
+│       │   ├── brotli_encode.c   # Stream, level 0 store, level 1 dispatch
+│       │   ├── brotli_lz.c       # Level 1 LZ77 and Huffman meta-blocks
 │       │   ├── brotli_prefix.c   # Prefix codes
 │       │   ├── brotli_dict.c     # Static dictionary transforms
 │       │   ├── brotli_tables.c   # Dictionary, transforms, context LUTs

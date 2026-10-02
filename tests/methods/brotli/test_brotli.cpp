@@ -1,8 +1,8 @@
 /**
  * @file test_brotli.cpp
  *
- * Brotli (RFC 7932): the trivial encoder's bytes, a full decode of those
- * bytes, and a decode of streams produced by libbrotli. The pinned copy of
+ * Brotli (RFC 7932): level 0's stored bytes, level 1's compressed blocks, and
+ * a decode of streams produced by libbrotli. The pinned copy of
  * that library is the one in the oracle image (libbrotli 1.1.0). These tests
  * load it by soname, which is the image's copy when `make check-oracle` runs
  * them and this machine's copy when `make test` does.
@@ -30,15 +30,22 @@
 
 namespace {
 
-gcomp_options_t * lgwin_options(int lgwin) {
+gcomp_options_t * lgwin_options(int lgwin, int level) {
   gcomp_options_t * opts = nullptr;
   EXPECT_EQ(gcomp_options_create(&opts), GCOMP_OK);
-  EXPECT_EQ(gcomp_options_set_int64(opts, "brotli.lgwin", lgwin), GCOMP_OK);
+  if (lgwin != 0) {
+    EXPECT_EQ(gcomp_options_set_int64(opts, "brotli.lgwin", lgwin), GCOMP_OK);
+  }
+  if (level >= 0) {
+    EXPECT_EQ(gcomp_options_set_int64(opts, "brotli.level", level), GCOMP_OK);
+  }
   return opts;
 }
 
-std::vector<uint8_t> encode_bytes(const uint8_t * data, size_t len, int lgwin) {
-  gcomp_options_t * opts = lgwin == 0 ? nullptr : lgwin_options(lgwin);
+std::vector<uint8_t> encode_bytes(const uint8_t * data, size_t len, int lgwin,
+    int level = -1) {
+  gcomp_options_t * opts =
+      (lgwin == 0 && level < 0) ? nullptr : lgwin_options(lgwin, level);
   std::vector<uint8_t> out(len + 64);
   size_t written = 0;
   gcomp_status_t st = gcomp_encode_buffer(nullptr, "brotli", opts, data, len,
@@ -154,7 +161,7 @@ TEST(Brotli, EmptyWindowBits) {
 
 TEST(Brotli, SingleByteIsTheTrivialLayout) {
   const uint8_t a = 'a';
-  std::vector<uint8_t> enc = encode_bytes(&a, 1, 16);
+  std::vector<uint8_t> enc = encode_bytes(&a, 1, 16, 0);
   const uint8_t want[] = {0x0c, 0x00, 0x00, 0x08, 'a', 0x03};
   ASSERT_EQ(enc.size(), sizeof(want));
   EXPECT_EQ(memcmp(enc.data(), want, sizeof(want)), 0);
@@ -168,7 +175,7 @@ TEST(Brotli, ChunkOf65536ThenTerminator) {
   for (size_t i = 0; i < data.size(); i++) {
     data[i] = (uint8_t)(i * 3);
   }
-  std::vector<uint8_t> enc = encode_bytes(data.data(), data.size(), 16);
+  std::vector<uint8_t> enc = encode_bytes(data.data(), data.size(), 16, 0);
   ASSERT_GE(enc.size(), 5u);
   EXPECT_EQ(enc[0], 0x0c);
   EXPECT_EQ(enc[1], 248);
@@ -184,7 +191,7 @@ TEST(Brotli, ChunkOf65536ThenTerminator) {
 TEST(Brotli, ChunkBoundarySplits65537) {
   std::vector<uint8_t> data(65537, 0x5a);
   data[65536] = 0x11;
-  std::vector<uint8_t> enc = encode_bytes(data.data(), data.size(), 16);
+  std::vector<uint8_t> enc = encode_bytes(data.data(), data.size(), 16, 0);
   ASSERT_EQ(enc.size(), 1u + 3u + 65536u + 3u + 1u + 1u);
   EXPECT_EQ(enc[0], 0x0c);
   EXPECT_EQ(enc[65540], 0x00);
@@ -195,6 +202,54 @@ TEST(Brotli, ChunkBoundarySplits65537) {
   std::vector<uint8_t> dec =
       decode_bytes(enc.data(), enc.size(), data.size() + 8);
   ASSERT_EQ(dec, data);
+}
+
+TEST(Brotli, LevelOneShrinksARun) {
+  std::vector<uint8_t> data(8000, 'a');
+  std::vector<uint8_t> stored = encode_bytes(data.data(), data.size(), 16, 0);
+  std::vector<uint8_t> comp = encode_bytes(data.data(), data.size(), 16, 1);
+  ASSERT_LT(comp.size(), stored.size() / 8);
+  std::vector<uint8_t> dec = decode_bytes(comp.data(), comp.size(), data.size() + 8);
+  ASSERT_EQ(dec, data);
+
+  const BrotliLib & lib = brotli_lib();
+  if (lib.ok()) {
+    std::vector<uint8_t> out(data.size() + 8);
+    size_t written = out.size();
+    ASSERT_EQ(lib.decompress(comp.size(), comp.data(), &written, out.data()), 1);
+    ASSERT_EQ(written, data.size());
+    EXPECT_EQ(memcmp(out.data(), data.data(), data.size()), 0);
+  }
+}
+
+TEST(Brotli, LevelOneBlockCanExceed65536) {
+  std::vector<uint8_t> data(200000);
+  for (size_t i = 0; i < data.size(); i++) {
+    data[i] = (uint8_t)("abcd"[i % 4]);
+  }
+  std::vector<uint8_t> stored = encode_bytes(data.data(), data.size(), 16, 0);
+  std::vector<uint8_t> comp = encode_bytes(data.data(), data.size(), 16, 1);
+  EXPECT_LT(comp.size(), stored.size() / 8);
+  std::vector<uint8_t> dec =
+      decode_bytes(comp.data(), comp.size(), data.size() + 8);
+  ASSERT_EQ(dec, data);
+}
+
+TEST(Brotli, LevelOneRoundTripsTextAndNoise) {
+  std::vector<uint8_t> text;
+  const char * phrase = "the quick brown fox jumps over the lazy dog ";
+  while (text.size() < 12000) {
+    text.insert(text.end(), phrase, phrase + strlen(phrase));
+  }
+  text.resize(12000);
+  std::vector<uint8_t> noise(3000);
+  test_helpers_generate_random(noise.data(), noise.size(), 19);
+  expect_roundtrip(text.data(), text.size(), 16);
+  expect_roundtrip(text.data(), text.size(), 10);
+  expect_roundtrip(noise.data(), noise.size(), 24);
+  std::vector<uint8_t> stored = encode_bytes(text.data(), text.size(), 16, 0);
+  std::vector<uint8_t> comp = encode_bytes(text.data(), text.size(), 16, 1);
+  EXPECT_LT(comp.size(), stored.size() / 2);
 }
 
 TEST(Brotli, RoundTrip) {

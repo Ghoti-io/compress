@@ -21,16 +21,18 @@
 /**
  * @file brotli_encode.c
  *
- * The trivial compressor from RFC 7932 section 11.1.
+ * Brotli encoder.
  *
- * A non-empty stream opens with the window bits and an empty metadata
- * meta-block, which lands the rest of the stream on a byte boundary. Input
- * is then stored in uncompressed meta-blocks of at most 65536 bytes. Flush
- * ends the current one so a decoder can produce every byte consumed so far
- * without finish(). Finish writes the empty last meta-block, which is the
- * single byte 0x03 once the stream is aligned. An empty input is only the
- * window bits plus ISLAST and ISLASTEMPTY: for the default 16-bit window
- * that is the byte 0x06.
+ * Level 0 is the trivial compressor from RFC 7932 section 11.1: a non-empty
+ * stream opens with the window bits and an empty metadata meta-block, which
+ * lands the rest of the stream on a byte boundary, and input is stored in
+ * uncompressed meta-blocks of at most 65536 bytes. Level 1 writes a
+ * compressed meta-block when that is smaller than storing the chunk, and
+ * stores it otherwise. Flush ends the current meta-block so a decoder can
+ * produce every byte consumed so far without finish(). Finish writes the
+ * empty last meta-block, which is the single byte 0x03 once the stream is
+ * aligned. An empty input is only the window bits plus ISLAST and
+ * ISLASTEMPTY: for the default 16-bit window that is the byte 0x06.
  */
 
 #include <ghoti.io/compress/macros.h>
@@ -42,8 +44,12 @@
 
 #include <string.h>
 
-#define BROTLI_CHUNK 65536u
-#define BROTLI_QUEUE (BROTLI_CHUNK + 64u)
+#define BROTLI_STORE 65536u
+/* A compressed meta-block may be longer than an uncompressed one. One block
+ * for this much input pays the Huffman header once; the store fallback still
+ * splits at BROTLI_STORE, which is the format's uncompressed-block limit. */
+#define BROTLI_BLOCK (256u * 1024u)
+#define BROTLI_SLACK 256u
 
 typedef struct brotli_bw_s {
   uint8_t * buf;
@@ -56,14 +62,27 @@ typedef struct brotli_bw_s {
 typedef struct brotli_enc_s {
   const gcomp_allocator_t * alloc;
   int lgwin;
+  int level;
   int started;
   int finished;
-  uint8_t hold[BROTLI_CHUNK];
+  uint32_t dist_rb[4];
+  uint8_t * hold;
   size_t hold_len;
+  size_t hold_cap;
   uint8_t * queue;
+  size_t q_cap;
+  uint8_t * scratch;
+  size_t scratch_cap;
   size_t q_len;
   size_t q_pos;
 } brotli_enc_t;
+
+static void reset_dist(brotli_enc_t * st) {
+  st->dist_rb[0] = 4;
+  st->dist_rb[1] = 11;
+  st->dist_rb[2] = 15;
+  st->dist_rb[3] = 16;
+}
 
 static int bw_put(brotli_bw_t * b, uint32_t bits, int n) {
   if (n <= 0) {
@@ -120,7 +139,7 @@ static void drain(brotli_enc_t * st, gcomp_buffer_t * output) {
 }
 
 static int q_add(brotli_enc_t * st, const uint8_t * bytes, size_t n) {
-  if (st->q_len + n > BROTLI_QUEUE) {
+  if (st->q_len + n > st->q_cap) {
     return -1;
   }
   memcpy(st->queue + st->q_len, bytes, n);
@@ -155,10 +174,63 @@ static int write_empty(brotli_enc_t * st) {
   return q_add(st, tmp, bw.len);
 }
 
+static int write_stored(brotli_enc_t * st, const uint8_t * data, size_t len);
+
+static int write_stored_span(brotli_enc_t * st, const uint8_t * data, size_t len) {
+  size_t off = 0;
+  while (off < len) {
+    size_t n = len - off;
+    if (n > BROTLI_STORE) {
+      n = BROTLI_STORE;
+    }
+    if (write_stored(st, data + off, n) != 0) {
+      return -1;
+    }
+    off += n;
+  }
+  return 0;
+}
+
+static int write_chunk(brotli_enc_t * st) {
+  size_t n = 0;
+  int r;
+  uint32_t window;
+  if (st->hold_len == 0 || st->hold_len > st->hold_cap) {
+    return -1;
+  }
+  if (st->level < 1) {
+    return write_stored(st, st->hold, st->hold_len);
+  }
+  window = (1u << st->lgwin) - 16u;
+  r = brotli_compress_chunk(st->alloc, st->scratch, st->scratch_cap, &n,
+      st->hold, st->hold_len, window, st->dist_rb);
+  if (r < 0) {
+    return -2;
+  }
+  if (r > 0) {
+    return write_stored_span(st, st->hold, st->hold_len);
+  }
+  return q_add(st, st->scratch, n);
+}
+
+static gcomp_status_t emit_hold(gcomp_encoder_t * encoder, brotli_enc_t * st) {
+  int r = write_chunk(st);
+  if (r == 0) {
+    st->hold_len = 0;
+    return GCOMP_OK;
+  }
+  if (r == -2) {
+    return gcomp_encoder_set_error(
+        encoder, GCOMP_ERR_MEMORY, "brotli: out of memory");
+  }
+  return gcomp_encoder_set_error(encoder, GCOMP_ERR_INTERNAL,
+      "brotli: block did not fit the output queue");
+}
+
 static int write_stored(brotli_enc_t * st, const uint8_t * data, size_t len) {
   uint32_t r;
   uint8_t hdr[3];
-  if (len == 0 || len > BROTLI_CHUNK) {
+  if (len == 0 || len > BROTLI_STORE) {
     return -1;
   }
   r = (uint32_t)len - 1u;
@@ -188,6 +260,7 @@ gcomp_status_t brotli_encoder_init(gcomp_registry_t * registry,
   const gcomp_allocator_t * alloc = gcomp_registry_get_allocator(registry);
   brotli_enc_t * st;
   int64_t lgwin = 16;
+  int64_t level = 1;
 
   if (options &&
       gcomp_options_get_int64(options, "brotli.lgwin", &lgwin) == GCOMP_OK) {
@@ -196,16 +269,40 @@ gcomp_status_t brotli_encoder_init(gcomp_registry_t * registry,
           "brotli.lgwin must be from 10 to 24");
     }
   }
+  if (options &&
+      gcomp_options_get_int64(options, "brotli.level", &level) == GCOMP_OK) {
+    if (level < 0 || level > 1) {
+      return gcomp_encoder_set_error(encoder, GCOMP_ERR_INVALID_ARG,
+          "brotli.level must be 0 or 1");
+    }
+  }
   st = gcomp_calloc(alloc, 1, sizeof(*st));
   if (!st) {
     return GCOMP_ERR_MEMORY;
   }
   st->alloc = alloc;
   st->lgwin = (int)lgwin;
-  st->queue = gcomp_malloc(alloc, BROTLI_QUEUE);
-  if (!st->queue) {
+  st->level = (int)level;
+  st->hold_cap = st->level >= 1 ? BROTLI_BLOCK : BROTLI_STORE;
+  st->q_cap = st->hold_cap + BROTLI_SLACK;
+  st->scratch_cap = st->level >= 1 ? st->q_cap : 0;
+  reset_dist(st);
+  st->hold = gcomp_malloc(alloc, st->hold_cap);
+  st->queue = gcomp_malloc(alloc, st->q_cap);
+  if (!st->hold || !st->queue) {
+    gcomp_free(alloc, st->hold);
+    gcomp_free(alloc, st->queue);
     gcomp_free(alloc, st);
     return GCOMP_ERR_MEMORY;
+  }
+  if (st->scratch_cap != 0) {
+    st->scratch = gcomp_malloc(alloc, st->scratch_cap);
+    if (!st->scratch) {
+      gcomp_free(alloc, st->hold);
+      gcomp_free(alloc, st->queue);
+      gcomp_free(alloc, st);
+      return GCOMP_ERR_MEMORY;
+    }
   }
   encoder->method_state = st;
   return GCOMP_OK;
@@ -217,6 +314,8 @@ void brotli_encoder_destroy(gcomp_encoder_t * encoder) {
     return;
   }
   st = encoder->method_state;
+  gcomp_free(st->alloc, st->scratch);
+  gcomp_free(st->alloc, st->hold);
   gcomp_free(st->alloc, st->queue);
   gcomp_free(st->alloc, st);
   encoder->method_state = NULL;
@@ -248,10 +347,10 @@ gcomp_status_t brotli_encoder_update(gcomp_encoder_t * encoder,
   }
   src = input->data ? (const uint8_t *)input->data : NULL;
   for (;;) {
-    while (input->used < input->size && st->hold_len < BROTLI_CHUNK) {
+    while (input->used < input->size && st->hold_len < st->hold_cap) {
       st->hold[st->hold_len++] = src[input->used++];
     }
-    if (st->hold_len < BROTLI_CHUNK) {
+    if (st->hold_len < st->hold_cap) {
       break;
     }
     if (!st->started) {
@@ -261,11 +360,10 @@ gcomp_status_t brotli_encoder_update(gcomp_encoder_t * encoder,
       }
       st->started = 1;
     }
-    if (write_stored(st, st->hold, st->hold_len) != 0) {
-      return gcomp_encoder_set_error(encoder, GCOMP_ERR_INTERNAL,
-          "brotli: stored block did not fit the output queue");
+    chk = emit_hold(encoder, st);
+    if (chk != GCOMP_OK) {
+      return chk;
     }
-    st->hold_len = 0;
     drain(st, output);
     if (st->q_len != 0) {
       break;
@@ -308,11 +406,10 @@ gcomp_status_t brotli_encoder_finish(gcomp_encoder_t * encoder,
       st->started = 1;
     }
     if (st->hold_len != 0) {
-      if (write_stored(st, st->hold, st->hold_len) != 0) {
-        return gcomp_encoder_set_error(encoder, GCOMP_ERR_INTERNAL,
-            "brotli: stored block did not fit the output queue");
+      chk = emit_hold(encoder, st);
+      if (chk != GCOMP_OK) {
+        return chk;
       }
-      st->hold_len = 0;
     }
     if (q_add(st, &term, 1) != 0) {
       return gcomp_encoder_set_error(encoder, GCOMP_ERR_INTERNAL,
@@ -358,11 +455,10 @@ gcomp_status_t brotli_encoder_flush(gcomp_encoder_t * encoder,
     }
     st->started = 1;
   }
-  if (write_stored(st, st->hold, st->hold_len) != 0) {
-    return gcomp_encoder_set_error(encoder, GCOMP_ERR_INTERNAL,
-        "brotli: stored block did not fit the output queue");
+  chk = emit_hold(encoder, st);
+  if (chk != GCOMP_OK) {
+    return chk;
   }
-  st->hold_len = 0;
   drain(st, output);
   if (st->q_len != 0) {
     return GCOMP_ERR_LIMIT;
@@ -384,6 +480,7 @@ gcomp_status_t brotli_encoder_reset(gcomp_encoder_t * encoder) {
   st->q_len = 0;
   st->q_pos = 0;
   st->lgwin = lgwin;
+  reset_dist(st);
   encoder->last_error = GCOMP_OK;
   encoder->error_detail[0] = '\0';
   return GCOMP_OK;

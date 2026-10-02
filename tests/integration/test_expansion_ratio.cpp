@@ -15,6 +15,7 @@
  * | deflate, zlib, gzip | 1032 : 1 | RFC 1951 3.2.5: 258 bytes in two bits |
  * | lzw | 2560 : 1 | TIFF 6.0 section 13: a 3839-byte string in twelve bits |
  * | zstd | 32768 : 1 | RFC 8878 3.1.1.2.2: an RLE_Block is four bytes |
+| brotli | 1290556 : 1 | RFC 7932: a last compressed meta-block can carry 16777216 bytes |
  *
  * A limit set below a format's ceiling refuses streams the format may
  * legitimately produce; set at or above it, it never fires. For DEFLATE the
@@ -44,6 +45,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <ghoti.io/compress/brotli.h>
 #include <ghoti.io/compress/compress.h>
 #include <ghoti.io/compress/deflate.h>
 #include <ghoti.io/compress/gzip.h>
@@ -438,6 +440,7 @@ const MethodCase k_methods[] = {
     {"lz4", nullptr, 0, GCOMP_LZ4_MAX_EXPANSION_RATIO},
     {"lzw", nullptr, 0, GCOMP_LZW_MAX_EXPANSION_RATIO},
     {"rle", nullptr, 0, GCOMP_RLE_MAX_EXPANSION_RATIO},
+    {"brotli", "brotli.level", 1, GCOMP_BROTLI_MAX_EXPANSION_RATIO},
 };
 
 /**

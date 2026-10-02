@@ -24,7 +24,7 @@ libc.
 | `"zlib"` | RFC 1950. |
 | `"gzip"` | RFC 1952. |
 | `"lz4"` | `threads.count` encodes blocks in parallel. That output is byte-identical to the single-threaded stream. |
-| `"brotli"` | RFC 7932. The encoder writes uncompressed meta-blocks (section 11.1). The decoder reads the format. |
+| `"brotli"` | RFC 7932. Level 1 (the default) writes LZ77 and Huffman; level 0 stores uncompressed meta-blocks. The decoder reads the format. |
 | `"lzw"`, `"rle"` | The same registry, the same buffer rule. |
 | `"zstd"` | `threads.count` encodes blocks in parallel. `seekable.h` is random access into a seekable frame. |
 
