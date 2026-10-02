@@ -36,6 +36,7 @@
 #include <ghoti.io/compress/macros.h>
 
 #include "../../core/alloc_internal.h"
+#include "brotli_bw.h"
 #include "brotli_internal.h"
 
 #include <string.h>
@@ -60,14 +61,6 @@
  * (lgwin 24's window is 16777200), and the arms below that still refuse a
  * command are unreachable rather than merely unlikely. */
 #define BROTLI_MAX_DIST (((3u << 24) - 3u) + (1u << 24) - 1u)
-
-typedef struct brotli_bw_s {
-  uint8_t * buf;
-  size_t cap;
-  size_t len;
-  uint64_t acc;
-  int nbits;
-} brotli_bw_t;
 
 typedef struct brotli_canon_s {
   uint16_t code;
@@ -105,33 +98,6 @@ static const uint32_t k_copy_base[24] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 18,
     22, 30, 38, 54, 70, 102, 134, 198, 326, 582, 1094, 2118};
 static const int k_cl_order[18] = {
     1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15};
-
-static int bw_put(brotli_bw_t * b, uint32_t bits, int n) {
-  if (n <= 0) {
-    return 0;
-  }
-  if (n > 24) {
-    return -1;
-  }
-  b->acc |= (uint64_t)(bits & ((1u << n) - 1u)) << b->nbits;
-  b->nbits += n;
-  while (b->nbits >= 8) {
-    if (b->len >= b->cap) {
-      return -1;
-    }
-    b->buf[b->len++] = (uint8_t)b->acc;
-    b->acc >>= 8;
-    b->nbits -= 8;
-  }
-  return 0;
-}
-
-static int bw_align(brotli_bw_t * b) {
-  if (b->nbits == 0) {
-    return 0;
-  }
-  return bw_put(b, 0, 8 - b->nbits);
-}
 
 static int length_code(uint32_t len, const uint32_t * base,
     const uint8_t * extra, int * code, uint32_t * ebits, int * nbits) {
@@ -469,7 +435,7 @@ static int alpha_bits(int n) {
   return bits;
 }
 
-/* The canonical code is numbered MSB first. bw_put shifts the low bit out
+/* The canonical code is numbered MSB first. brotli_bw_put shifts the low bit out
  * first, so the stored code is reversed and one put writes the symbol. */
 static uint16_t reverse_code(uint32_t code, int len) {
   uint16_t rev = 0;
@@ -513,23 +479,23 @@ static int put_canon(brotli_bw_t * b, const brotli_canon_t * c) {
   if (c->len == 0) {
     return 0;
   }
-  return bw_put(b, c->code, (int)c->len);
+  return brotli_bw_put(b, c->code, (int)c->len);
 }
 
 static int write_cl_static(brotli_bw_t * b, int v) {
   switch (v) {
   case 0:
-    return bw_put(b, 0, 2);
+    return brotli_bw_put(b, 0, 2);
   case 3:
-    return bw_put(b, 2, 2);
+    return brotli_bw_put(b, 2, 2);
   case 4:
-    return bw_put(b, 1, 2);
+    return brotli_bw_put(b, 1, 2);
   case 2:
-    return bw_put(b, 3, 3);
+    return brotli_bw_put(b, 3, 3);
   case 1:
-    return bw_put(b, 7, 4);
+    return brotli_bw_put(b, 7, 4);
   case 5:
-    return bw_put(b, 15, 4);
+    return brotli_bw_put(b, 15, 4);
   default:
     return -1;
   }
@@ -659,11 +625,11 @@ static int collect_syms(const uint32_t * freq, int alphabet, int * got) {
   return n;
 }
 
+/* The simple prefix codes of RFC 7932 section 3.4. One symbol is not among
+ * them: write_prefix answers that case with the single-symbol form before it
+ * gets here, so nsym is 2, 3 or 4. */
 static void simple_lengths(uint8_t * lens, int alphabet, const int * got, int nsym) {
   memset(lens, 0, (size_t)alphabet);
-  if (nsym == 1) {
-    return;
-  }
   if (nsym == 2) {
     lens[got[0]] = 1;
     lens[got[1]] = 1;
@@ -711,8 +677,8 @@ static int write_prefix(const gcomp_allocator_t * alloc, brotli_bw_t * b,
       }
     }
     ab = alpha_bits(alphabet);
-    if (bw_put(b, 1, 2) != 0 || bw_put(b, 0, 2) != 0 ||
-        bw_put(b, (uint32_t)sym, ab) != 0) {
+    if (brotli_bw_put(b, 1, 2) != 0 || brotli_bw_put(b, 0, 2) != 0 ||
+        brotli_bw_put(b, (uint32_t)sym, ab) != 0) {
       return -1;
     }
     codes[sym].len = 0;
@@ -723,15 +689,15 @@ static int write_prefix(const gcomp_allocator_t * alloc, brotli_bw_t * b,
     int ab = alpha_bits(alphabet);
     simple_lengths(lens, alphabet, got, nsym);
     build_canon(lens, alphabet, codes);
-    if (bw_put(b, 1, 2) != 0 || bw_put(b, (uint32_t)(nsym - 1), 2) != 0) {
+    if (brotli_bw_put(b, 1, 2) != 0 || brotli_bw_put(b, (uint32_t)(nsym - 1), 2) != 0) {
       return -1;
     }
     for (i = 0; i < nsym; i++) {
-      if (bw_put(b, (uint32_t)got[i], ab) != 0) {
+      if (brotli_bw_put(b, (uint32_t)got[i], ab) != 0) {
         return -1;
       }
     }
-    if (nsym == 4 && bw_put(b, 1, 1) != 0) {
+    if (nsym == 4 && brotli_bw_put(b, 1, 1) != 0) {
       return -1;
     }
     return 0;
@@ -778,7 +744,7 @@ static int write_prefix(const gcomp_allocator_t * alloc, brotli_bw_t * b,
       gcomp_free(alloc, toks);
       return -1;
     }
-    if (bw_put(b, 0, 2) != 0) {
+    if (brotli_bw_put(b, 0, 2) != 0) {
       gcomp_free(alloc, toks);
       return -1;
     }
@@ -831,7 +797,7 @@ static int write_prefix(const gcomp_allocator_t * alloc, brotli_bw_t * b,
         return -1;
       }
       if (toks[i].nextra != 0 &&
-          bw_put(b, toks[i].extra, (int)toks[i].nextra) != 0) {
+          brotli_bw_put(b, toks[i].extra, (int)toks[i].nextra) != 0) {
         gcomp_free(alloc, toks);
         return -1;
       }
@@ -1141,23 +1107,23 @@ static int write_mlen(brotli_bw_t * b, size_t len) {
   else {
     nibbles = 6;
   }
-  if (bw_put(b, 0, 1) != 0 || bw_put(b, (uint32_t)(nibbles - 4), 2) != 0) {
+  if (brotli_bw_put(b, 0, 1) != 0 || brotli_bw_put(b, (uint32_t)(nibbles - 4), 2) != 0) {
     return -1;
   }
   for (i = 0; i < nibbles; i++) {
-    if (bw_put(b, (r >> (i * 4)) & 15u, 4) != 0) {
+    if (brotli_bw_put(b, (r >> (i * 4)) & 15u, 4) != 0) {
       return -1;
     }
   }
-  return bw_put(b, 0, 1);
+  return brotli_bw_put(b, 0, 1);
 }
 
 static int write_meta_align(brotli_bw_t * b) {
-  if (bw_put(b, 0, 1) != 0 || bw_put(b, 3, 2) != 0 || bw_put(b, 0, 1) != 0 ||
-      bw_put(b, 0, 2) != 0) {
+  if (brotli_bw_put(b, 0, 1) != 0 || brotli_bw_put(b, 3, 2) != 0 || brotli_bw_put(b, 0, 1) != 0 ||
+      brotli_bw_put(b, 0, 2) != 0) {
     return -1;
   }
-  return bw_align(b);
+  return brotli_bw_align(b);
 }
 
 static unsigned floor_log2_u32(uint32_t v) {
@@ -1310,8 +1276,8 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
       gcomp_free(alloc, dist_code);
       return -1;
     }
-    if (put_canon(b, &ic_code[ic]) != 0 || bw_put(b, ins_extra, ins_n) != 0 ||
-        bw_put(b, copy_extra, copy_n) != 0) {
+    if (put_canon(b, &ic_code[ic]) != 0 || brotli_bw_put(b, ins_extra, ins_n) != 0 ||
+        brotli_bw_put(b, copy_extra, copy_n) != 0) {
       gcomp_free(alloc, lit_code);
       gcomp_free(alloc, ic_code);
       gcomp_free(alloc, dist_code);
@@ -1328,7 +1294,7 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
     }
     if (!cmds[c].tail && !implicit) {
       if (put_canon(b, &dist_code[dist_sym]) != 0 ||
-          bw_put(b, dist_extra, dist_n) != 0) {
+          brotli_bw_put(b, dist_extra, dist_n) != 0) {
         gcomp_free(alloc, lit_code);
         gcomp_free(alloc, ic_code);
         gcomp_free(alloc, dist_code);
@@ -1378,11 +1344,11 @@ int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
   bw.cap = dst_cap < stored ? dst_cap : stored;
   memcpy(rb, dist_rb, sizeof(rb));
   fresh = *rb_fresh;
-  if (write_mlen(&bw, len) != 0 || bw_put(&bw, 0, 1) != 0 ||
-      bw_put(&bw, 0, 1) != 0 || bw_put(&bw, 0, 1) != 0 ||
-      bw_put(&bw, 0, 2) != 0 || bw_put(&bw, 0, 4) != 0 ||
-      bw_put(&bw, 0, 2) != 0 || bw_put(&bw, 0, 1) != 0 ||
-      bw_put(&bw, 0, 1) != 0) {
+  if (write_mlen(&bw, len) != 0 || brotli_bw_put(&bw, 0, 1) != 0 ||
+      brotli_bw_put(&bw, 0, 1) != 0 || brotli_bw_put(&bw, 0, 1) != 0 ||
+      brotli_bw_put(&bw, 0, 2) != 0 || brotli_bw_put(&bw, 0, 4) != 0 ||
+      brotli_bw_put(&bw, 0, 2) != 0 || brotli_bw_put(&bw, 0, 1) != 0 ||
+      brotli_bw_put(&bw, 0, 1) != 0) {
     gcomp_free(alloc, cmds);
     return 1;
   }

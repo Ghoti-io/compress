@@ -40,6 +40,7 @@
 #include "../../core/alloc_internal.h"
 #include "../../core/registry_internal.h"
 #include "../../core/stream_internal.h"
+#include "brotli_bw.h"
 #include "brotli_internal.h"
 
 #include <string.h>
@@ -50,14 +51,6 @@
  * splits at BROTLI_STORE, which is the format's uncompressed-block limit. */
 #define BROTLI_BLOCK (256u * 1024u)
 #define BROTLI_SLACK 256u
-
-typedef struct brotli_bw_s {
-  uint8_t * buf;
-  size_t cap;
-  size_t len;
-  uint64_t acc;
-  int nbits;
-} brotli_bw_t;
 
 typedef struct brotli_enc_s {
   const gcomp_allocator_t * alloc;
@@ -89,47 +82,23 @@ static void reset_dist(brotli_enc_t * st) {
   st->rb_fresh = 0;
 }
 
-static int bw_put(brotli_bw_t * b, uint32_t bits, int n) {
-  if (n <= 0) {
-    return 0;
-  }
-  b->acc |= (uint64_t)(bits & ((1u << n) - 1u)) << b->nbits;
-  b->nbits += n;
-  while (b->nbits >= 8) {
-    if (b->len >= b->cap) {
-      return -1;
-    }
-    b->buf[b->len++] = (uint8_t)b->acc;
-    b->acc >>= 8;
-    b->nbits -= 8;
-  }
-  return 0;
-}
-
-static int bw_align(brotli_bw_t * b) {
-  if (b->nbits == 0) {
-    return 0;
-  }
-  return bw_put(b, 0, 8 - b->nbits);
-}
-
 static int write_wbits(brotli_bw_t * b, int w) {
   if (w == 16) {
-    return bw_put(b, 0, 1);
+    return brotli_bw_put(b, 0, 1);
   }
-  if (bw_put(b, 1, 1) != 0) {
+  if (brotli_bw_put(b, 1, 1) != 0) {
     return -1;
   }
   if (w >= 18 && w <= 24) {
-    return bw_put(b, (uint32_t)(w - 17), 3);
+    return brotli_bw_put(b, (uint32_t)(w - 17), 3);
   }
-  if (bw_put(b, 0, 3) != 0) {
+  if (brotli_bw_put(b, 0, 3) != 0) {
     return -1;
   }
   if (w == 17) {
-    return bw_put(b, 0, 3);
+    return brotli_bw_put(b, 0, 3);
   }
-  return bw_put(b, (uint32_t)(w - 8), 3);
+  return brotli_bw_put(b, (uint32_t)(w - 8), 3);
 }
 
 static void drain(brotli_enc_t * st, gcomp_buffer_t * output) {
@@ -158,9 +127,9 @@ static int write_header(brotli_enc_t * st) {
   memset(&bw, 0, sizeof(bw));
   bw.buf = tmp;
   bw.cap = sizeof(tmp);
-  if (write_wbits(&bw, st->lgwin) != 0 || bw_put(&bw, 0, 1) != 0 ||
-      bw_put(&bw, 3, 2) != 0 || bw_put(&bw, 0, 1) != 0 || bw_put(&bw, 0, 2) != 0 ||
-      bw_align(&bw) != 0) {
+  if (write_wbits(&bw, st->lgwin) != 0 || brotli_bw_put(&bw, 0, 1) != 0 ||
+      brotli_bw_put(&bw, 3, 2) != 0 || brotli_bw_put(&bw, 0, 1) != 0 || brotli_bw_put(&bw, 0, 2) != 0 ||
+      brotli_bw_align(&bw) != 0) {
     return -1;
   }
   return q_add(st, tmp, bw.len);
@@ -172,8 +141,8 @@ static int write_empty(brotli_enc_t * st) {
   memset(&bw, 0, sizeof(bw));
   bw.buf = tmp;
   bw.cap = sizeof(tmp);
-  if (write_wbits(&bw, st->lgwin) != 0 || bw_put(&bw, 1, 1) != 0 ||
-      bw_put(&bw, 1, 1) != 0 || bw_align(&bw) != 0) {
+  if (write_wbits(&bw, st->lgwin) != 0 || brotli_bw_put(&bw, 1, 1) != 0 ||
+      brotli_bw_put(&bw, 1, 1) != 0 || brotli_bw_align(&bw) != 0) {
     return -1;
   }
   return q_add(st, tmp, bw.len);
@@ -496,20 +465,21 @@ gcomp_status_t brotli_encoder_flush(gcomp_encoder_t * encoder,
   return GCOMP_OK;
 }
 
+/* The window and the level survive a reset, because they are what the caller
+ * asked for at create and reset does not take options. Nothing here writes
+ * them, which is why the save-and-restore pair this used to carry around
+ * st->lgwin did nothing. */
 gcomp_status_t brotli_encoder_reset(gcomp_encoder_t * encoder) {
   brotli_enc_t * st;
-  int lgwin;
   if (!encoder || !encoder->method_state) {
     return GCOMP_ERR_INVALID_ARG;
   }
   st = encoder->method_state;
-  lgwin = st->lgwin;
   st->started = 0;
   st->finished = 0;
   st->hold_len = 0;
   st->q_len = 0;
   st->q_pos = 0;
-  st->lgwin = lgwin;
   reset_dist(st);
   encoder->last_error = GCOMP_OK;
   encoder->error_detail[0] = '\0';

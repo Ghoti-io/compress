@@ -563,6 +563,7 @@ compress/
 │   └── methods/                  # Compression method implementations
 │       ├── brotli/
 │       │   ├── brotli_decode.c   # RFC 7932 decoder
+│       │   ├── brotli_bw.h       # LSB-first bit writer, shared by both halves
 │       │   ├── brotli_encode.c   # Stream, level 0 store, level 1 dispatch
 │       │   ├── brotli_lz.c       # Level 1 LZ77 and Huffman meta-blocks
 │       │   ├── brotli_prefix.c   # Prefix codes
@@ -707,7 +708,7 @@ stream. That was a live defect in both, fixed in `lz4_encoder.c` and
 Deflate and zstd use separate bit I/O code by design; the duplication is intentional.
 
 - **Deflate** uses LSB-first (least significant bit first) bit I/O in `src/methods/deflate/bitreader.c` and `bitwriter.c`, per RFC 1951.
-- **Brotli** uses LSB-first bit I/O in `src/methods/brotli/brotli_bits.h`, per RFC 7932. It is its own reader; it does not share deflate's.
+- **Brotli** uses LSB-first bit I/O in `src/methods/brotli/brotli_bits.h` (reader) and `brotli_bw.h` (writer), per RFC 7932. They are its own; they do not share deflate's. Both halves of the encoder write bits and both use the one writer - the stream header and stored meta-blocks in `brotli_encode.c`, the compressed meta-block in `brotli_lz.c` - because when each kept a copy the two had already drifted over whether a put wider than 24 bits is refused.
 - **Zstd** uses MSB-first (most significant bit first) bit I/O in its own modules (`zstd_fse.c`, `zstd_huf.c`, `zstd_sequences.c`, `zstd_sequences_encode.c`, etc.) per the Zstandard specification.
 - **LZW** uses LSB-first (GIF) or MSB-first (TIFF) bit I/O in `src/methods/lzw/lzw_bitio.c`. The choice is profile-driven and affects on-the-wire representation.
 
@@ -716,7 +717,7 @@ Implementations are intentionally separate due to bit order and format-specific 
 ## Related Documentation
 
 - [Streaming API](api/streaming.md) - Detailed streaming usage patterns
-- [Brotli Module](modules/brotli.md) - Brotli window and the trivial encoder
+- [Brotli Module](modules/brotli.md) - Brotli window, levels, and what the encoder writes
 - [Deflate Module](modules/deflate.md) - Deflate-specific options and usage
 - [Gzip Module](modules/gzip.md) - Gzip-specific options and usage
 - [LZ4 Module](modules/lz4.md) - LZ4-specific options and usage
