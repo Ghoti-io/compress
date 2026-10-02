@@ -235,6 +235,53 @@ TEST(Brotli, LevelOneBlockCanExceed65536) {
   ASSERT_EQ(dec, data);
 }
 
+/**
+ * A match further back than 131068 bytes, which is where the distance
+ * alphabet's extra-bit widths used to stop.
+ *
+ * The far block can only be matched at a distance of 232000, so the window has
+ * to be at least lgwin 18 for the matcher to offer it at all - and an offered
+ * distance the emitter could not spell failed the whole meta-block, not just
+ * that command. Asking for a bigger window therefore made the output fourteen
+ * times larger: 250015 bytes at lgwin 20 against 17061 at lgwin 16, where the
+ * window is too small to find the match in the first place. The assertion is
+ * that a wider window is never worse than a narrower one, which is the
+ * property the cliff broke.
+ */
+TEST(Brotli, AFarMatchDoesNotCostTheWholeBlock) {
+  std::vector<uint8_t> data(250000);
+  const char * phrase = "lorem ipsum dolor sit amet consectetur ";
+  for (size_t i = 0; i < data.size(); i++) {
+    data[i] = (uint8_t)phrase[i % strlen(phrase)];
+  }
+  std::vector<uint8_t> block(8192);
+  test_helpers_generate_random(block.data(), block.size(), 23);
+  memcpy(data.data(), block.data(), block.size());
+  memcpy(data.data() + 232000, block.data(), block.size());
+
+  const std::vector<uint8_t> narrow = encode_bytes(data.data(), data.size(), 16);
+  ASSERT_LT(narrow.size(), data.size());
+  for (int lgwin : {18, 20, 22, 24}) {
+    const std::vector<uint8_t> wide =
+        encode_bytes(data.data(), data.size(), lgwin);
+    EXPECT_LE(wide.size(), narrow.size()) << "lgwin " << lgwin
+        << " produced more output than lgwin 16, so a distance it could reach "
+           "was one it could not spell";
+    std::vector<uint8_t> dec =
+        decode_bytes(wide.data(), wide.size(), data.size() + 8);
+    ASSERT_EQ(dec, data) << lgwin;
+    const BrotliLib & lib = brotli_lib();
+    if (lib.ok()) {
+      std::vector<uint8_t> out(data.size() + 8);
+      size_t written = out.size();
+      ASSERT_EQ(lib.decompress(wide.size(), wide.data(), &written, out.data()), 1)
+          << lgwin;
+      ASSERT_EQ(written, data.size()) << lgwin;
+      EXPECT_EQ(memcmp(out.data(), data.data(), data.size()), 0) << lgwin;
+    }
+  }
+}
+
 TEST(Brotli, LevelOneRoundTripsTextAndNoise) {
   std::vector<uint8_t> text;
   const char * phrase = "the quick brown fox jumps over the lazy dog ";

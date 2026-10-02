@@ -45,6 +45,22 @@
 #define BROTLI_CHAIN 128
 #define BROTLI_MIN_MATCH 4
 
+/* The largest distance the distance alphabet can express, which is the top of
+ * the last long code's range: with NPOSTFIX and NDIRECT both zero the alphabet
+ * is 16 short codes and 48 long ones, two per extra-bit width, so the widths
+ * run 1..24 and the last range is [(3 << 24) - 3, (3 << 24) - 3 + (1 << 24)).
+ *
+ * The matcher is clamped to this. It used to be free to return a distance the
+ * emitter could not spell, and because an unspellable command fails the whole
+ * meta-block rather than that one command, a single far match turned 256KiB of
+ * compressible input into a stored block: at lgwin 20 a 250000-byte file went
+ * out at 250015 bytes where the same file at lgwin 16 - whose window is too
+ * small to find the match at all - went out at 17061. The bound is the format's
+ * own, so every window RFC 7932 allows now fits inside it with room to spare
+ * (lgwin 24's window is 16777200), and the arms below that still refuse a
+ * command are unreachable rather than merely unlikely. */
+#define BROTLI_MAX_DIST (((3u << 24) - 3u) + (1u << 24) - 1u)
+
 typedef struct brotli_bw_s {
   uint8_t * buf;
   size_t cap;
@@ -255,7 +271,7 @@ static int long_dist_sym(uint32_t dist, int * sym, uint32_t * extra, int * nextr
   if (dist == 0) {
     return -1;
   }
-  for (nb = 1; nb <= 15; nb++) {
+  for (nb = 1; nb <= 24; nb++) {
     uint32_t count = 1u << nb;
     uint32_t start0 = (2u << nb) - 3u;
     uint32_t start1 = (3u << nb) - 3u;
@@ -1329,6 +1345,9 @@ int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
   int pr;
   if (!dst || !out_n || !data || !dist_rb || len == 0 || len > 16777216u) {
     return 1;
+  }
+  if (window > BROTLI_MAX_DIST) {
+    window = BROTLI_MAX_DIST;
   }
   stored = len + 3u * ((len + 65535u) / 65536u);
   if (dst_cap < 8) {
