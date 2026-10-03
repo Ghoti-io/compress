@@ -183,10 +183,59 @@ gcomp_status_t gcomp_decoder_create(gcomp_registry_t * registry,
   return GCOMP_OK;
 }
 
+/**
+ * @brief The fault in a caller's buffer, or NULL when there is none.
+ *
+ * `used` is how much of `size` has been consumed or produced, so `used`
+ * larger than `size` is a contradiction, and every method computes the bytes
+ * available as `size - used`. That subtraction is on size_t, so an
+ * inconsistent buffer does not give a method a small span - it gives one of
+ * nearly SIZE_MAX bytes, and the next memcpy reads or writes off the end of
+ * the caller's memory. Measured before this check existed: brotli's encoder
+ * took a heap-buffer-overflow and rle's walked off the end of the mapping,
+ * while the other six read whatever followed and returned GCOMP_OK.
+ *
+ * A NULL `data` with bytes still to go is the same kind of mistake. A buffer
+ * with `size == used` is finished, so its pointer is not dereferenced and
+ * may be NULL; that is how a caller signals "no more input" without having a
+ * buffer to point at.
+ *
+ * This is checked in the core rather than in each method because it is an
+ * argument check on a public entry point, which is what this layer already
+ * does for the handles, and because eight methods checking it separately is
+ * eight chances to leave one out - which is what had happened. brotli's
+ * decoder was the only one that refused any of this, and these are the
+ * messages it used.
+ */
+static const char * gcomp_buffer_fault(
+    const gcomp_buffer_t * buffer, int is_input) {
+  if (!buffer) {
+    return NULL;
+  }
+  if (buffer->used > buffer->size) {
+    return is_input ? "input used exceeds size" : "output used exceeds size";
+  }
+  if (buffer->size > buffer->used && buffer->data == NULL) {
+    return is_input ? "input data is NULL" : "output data is NULL";
+  }
+  return NULL;
+}
+
 gcomp_status_t gcomp_encoder_update(gcomp_encoder_t * encoder,
     gcomp_buffer_t * input, gcomp_buffer_t * output) {
   if (!encoder || !input || !output) {
     return GCOMP_ERR_INVALID_ARG;
+  }
+
+  {
+    const char * fault = gcomp_buffer_fault(input, 1);
+    if (!fault) {
+      fault = gcomp_buffer_fault(output, 0);
+    }
+    if (fault) {
+      return gcomp_encoder_set_error(
+          encoder, GCOMP_ERR_INVALID_ARG, "%s", fault);
+    }
   }
 
   if (!encoder->update_fn) {
@@ -202,6 +251,14 @@ gcomp_status_t gcomp_encoder_finish(
     return GCOMP_ERR_INVALID_ARG;
   }
 
+  {
+    const char * fault = gcomp_buffer_fault(output, 0);
+    if (fault) {
+      return gcomp_encoder_set_error(
+          encoder, GCOMP_ERR_INVALID_ARG, "%s", fault);
+    }
+  }
+
   if (!encoder->finish_fn) {
     return GCOMP_ERR_INTERNAL;
   }
@@ -213,6 +270,17 @@ gcomp_status_t gcomp_decoder_update(gcomp_decoder_t * decoder,
     gcomp_buffer_t * input, gcomp_buffer_t * output) {
   if (!decoder || !input || !output) {
     return GCOMP_ERR_INVALID_ARG;
+  }
+
+  {
+    const char * fault = gcomp_buffer_fault(input, 1);
+    if (!fault) {
+      fault = gcomp_buffer_fault(output, 0);
+    }
+    if (fault) {
+      return gcomp_decoder_set_error(
+          decoder, GCOMP_ERR_INVALID_ARG, "%s", fault);
+    }
   }
 
   if (!decoder->update_fn) {
@@ -228,6 +296,14 @@ gcomp_status_t gcomp_decoder_finish(
     return GCOMP_ERR_INVALID_ARG;
   }
 
+  {
+    const char * fault = gcomp_buffer_fault(output, 0);
+    if (fault) {
+      return gcomp_decoder_set_error(
+          decoder, GCOMP_ERR_INVALID_ARG, "%s", fault);
+    }
+  }
+
   if (!decoder->finish_fn) {
     return GCOMP_ERR_INTERNAL;
   }
@@ -240,6 +316,17 @@ gcomp_status_t gcomp_encoder_flush(
   if (!encoder || !output) {
     return GCOMP_ERR_INVALID_ARG;
   }
+  {
+    const char * fault = gcomp_buffer_fault(output, 0);
+    if (fault) {
+      return gcomp_encoder_set_error(
+          encoder, GCOMP_ERR_INVALID_ARG, "%s", fault);
+    }
+  }
+  // Stricter than gcomp_buffer_fault() for the one case the two differ on: a
+  // flush with a fully-used output buffer and no pointer has nowhere to put
+  // the bytes it is being asked to produce, where an update may legitimately
+  // be handed one to say "no room this time".
   if (output->size > 0 && !output->data) {
     return GCOMP_ERR_INVALID_ARG;
   }

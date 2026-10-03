@@ -216,18 +216,6 @@ static int write_stored(brotli_enc_t * st, const uint8_t * data, size_t len) {
   return 0;
 }
 
-static int output_ok(gcomp_encoder_t * encoder, gcomp_buffer_t * output) {
-  if (!output || (output->size > 0 && output->data == NULL)) {
-    return gcomp_encoder_set_error(encoder, GCOMP_ERR_INVALID_ARG,
-        "brotli: output buffer is NULL");
-  }
-  if (output->used > output->size) {
-    return gcomp_encoder_set_error(encoder, GCOMP_ERR_INVALID_ARG,
-        "brotli: output->used exceeds output->size");
-  }
-  return GCOMP_OK;
-}
-
 gcomp_status_t brotli_encoder_init(gcomp_registry_t * registry,
     gcomp_options_t * options, gcomp_encoder_t * encoder) {
   const gcomp_allocator_t * alloc = gcomp_registry_get_allocator(registry);
@@ -298,10 +286,10 @@ gcomp_status_t brotli_encoder_update(gcomp_encoder_t * encoder,
     gcomp_buffer_t * input, gcomp_buffer_t * output) {
   brotli_enc_t * st;
   const uint8_t * src;
-  gcomp_status_t chk = output_ok(encoder, output);
-  if (chk != GCOMP_OK) {
-    return chk;
-  }
+  gcomp_status_t chk;
+  /* gcomp_encoder_update() refuses an inconsistent or unbacked buffer on
+   * either side before this is called, so what is left to check here is this
+   * encoder's own state. */
   if (!encoder->method_state) {
     return GCOMP_ERR_INVALID_ARG;
   }
@@ -309,10 +297,6 @@ gcomp_status_t brotli_encoder_update(gcomp_encoder_t * encoder,
   if (st->finished) {
     return gcomp_encoder_set_error(encoder, GCOMP_ERR_INVALID_ARG,
         "brotli: encoder update after finish");
-  }
-  if (input->size > input->used && input->data == NULL) {
-    return gcomp_encoder_set_error(encoder, GCOMP_ERR_INVALID_ARG,
-        "brotli: input buffer is NULL");
   }
   drain(st, output);
   if (st->q_len != 0) {
@@ -356,10 +340,7 @@ gcomp_status_t brotli_encoder_finish(gcomp_encoder_t * encoder,
     gcomp_buffer_t * output) {
   brotli_enc_t * st;
   uint8_t term = 0x03;
-  gcomp_status_t chk = output_ok(encoder, output);
-  if (chk != GCOMP_OK) {
-    return chk;
-  }
+  gcomp_status_t chk;
   if (!encoder->method_state) {
     return GCOMP_ERR_INVALID_ARG;
   }
@@ -425,10 +406,7 @@ gcomp_status_t brotli_encoder_finish(gcomp_encoder_t * encoder,
 gcomp_status_t brotli_encoder_flush(gcomp_encoder_t * encoder,
     gcomp_buffer_t * output, gcomp_flush_t mode) {
   brotli_enc_t * st;
-  gcomp_status_t chk = output_ok(encoder, output);
-  if (chk != GCOMP_OK) {
-    return chk;
-  }
+  gcomp_status_t chk;
   if (!encoder->method_state) {
     return GCOMP_ERR_INVALID_ARG;
   }

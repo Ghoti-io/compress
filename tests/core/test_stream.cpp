@@ -7,7 +7,9 @@
  */
 
 #include "test_helpers.h"
+#include <cstdint>
 #include <cstring>
+#include <ghoti.io/compress/compress.h>
 #include <ghoti.io/compress/deflate.h>
 #include <ghoti.io/compress/errors.h>
 #include <ghoti.io/compress/macros.h>
@@ -16,6 +18,7 @@
 #include <ghoti.io/compress/registry.h>
 #include <ghoti.io/compress/stream.h>
 #include <gtest/gtest.h>
+#include <vector>
 
 // Include internal header for testing
 #include "../src/core/stream_internal.h"
@@ -930,6 +933,199 @@ TEST_F(StreamTest, DecoderResetClearsError) {
 
   gcomp_decoder_destroy(decoder);
   gcomp_registry_destroy(reg);
+}
+
+/**
+ * @brief Every method refuses a buffer whose fields contradict each other.
+ *
+ * A `gcomp_buffer_t` says how large it is, how much of that is used, and
+ * where the bytes are. Those three can be set so that they disagree, and
+ * every method in this library computes the bytes available as
+ * `size - used`. That subtraction is on size_t: an inconsistent buffer does
+ * not produce a small span, it produces one of nearly SIZE_MAX bytes, and
+ * the next memcpy runs off the end of the caller's memory.
+ *
+ * Measured before gcomp_encoder_update() began refusing it: brotli's encoder
+ * took an AddressSanitizer heap-buffer-overflow, rle's walked off the end of
+ * the mapping and took SIGSEGV, and the other six read whatever followed the
+ * caller's buffer and returned GCOMP_OK. brotli's decoder was the only one of
+ * the sixteen entry points that refused any of it, which is the shape worth
+ * remembering: an argument check written inside one method is a check the
+ * other seven do not have.
+ *
+ * So the sweep is over every method and both directions, and it asserts three
+ * things per case - the status, the detail naming the field, and that nothing
+ * was written. The last one matters most: a method that refuses after
+ * producing output has already done the damage.
+ */
+TEST(StreamBufferArguments, EveryMethodRefusesAnInconsistentBuffer) {
+  // A real stream per method, so the decoder cases are refused for their
+  // arguments rather than for the bytes.
+  static const char * const kMethods[] = {
+      "deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli"};
+
+  struct Case {
+    const char * what;
+    bool on_input;      ///< Spoil the input buffer rather than the output.
+    bool overused;      ///< used = size + 1, rather than data = NULL.
+    const char * detail;
+  };
+  static const Case kCases[] = {
+      {"input used exceeds size", true, true, "input used exceeds size"},
+      {"input data is NULL", true, false, "input data is NULL"},
+      {"output used exceeds size", false, true, "output used exceeds size"},
+      {"output data is NULL", false, false, "output data is NULL"},
+  };
+
+  std::vector<uint8_t> data(8192);
+  for (size_t i = 0; i < data.size(); i++) {
+    data[i] = (uint8_t)("buffer arguments "[i % 17]);
+  }
+
+  for (const char * method : kMethods) {
+    std::vector<uint8_t> stream(data.size() * 2 + 65536);
+    size_t stream_len = 0;
+    ASSERT_EQ(gcomp_encode_buffer(nullptr, method, nullptr, data.data(),
+                  data.size(), stream.data(), stream.size(), &stream_len),
+        GCOMP_OK)
+        << method;
+    stream.resize(stream_len);
+
+    for (const Case & c : kCases) {
+      std::vector<uint8_t> room(4096);
+
+      // The encoder.
+      {
+        gcomp_encoder_t * enc = nullptr;
+        ASSERT_EQ(gcomp_encoder_create(gcomp_registry_default(), method, nullptr, &enc),
+            GCOMP_OK)
+            << method;
+        gcomp_buffer_t in = {(void *)data.data(), data.size(), 0};
+        gcomp_buffer_t ob = {room.data(), room.size(), 0};
+        gcomp_buffer_t * spoil = c.on_input ? &in : &ob;
+        if (c.overused) {
+          spoil->used = spoil->size + 1;
+        }
+        else {
+          spoil->data = nullptr;
+        }
+        EXPECT_EQ(gcomp_encoder_update(enc, &in, &ob), GCOMP_ERR_INVALID_ARG)
+            << method << " encoder update: " << c.what;
+        EXPECT_STREQ(gcomp_encoder_get_error_detail(enc), c.detail)
+            << method << " encoder update: " << c.what;
+        if (!c.on_input || !c.overused) {
+          // The output buffer's own `used` is the one field the test spoils
+          // on purpose; everywhere else it must still be zero.
+          EXPECT_EQ(ob.used, c.on_input ? 0u : (c.overused ? ob.size + 1 : 0u))
+              << method << " encoder update: " << c.what << ": wrote anyway";
+        }
+        gcomp_encoder_destroy(enc);
+      }
+
+      // The encoder's finish and flush take only an output buffer.
+      if (!c.on_input) {
+        for (int which = 0; which < 2; which++) {
+          gcomp_encoder_t * enc = nullptr;
+          ASSERT_EQ(gcomp_encoder_create(gcomp_registry_default(), method, nullptr, &enc),
+              GCOMP_OK)
+              << method;
+          gcomp_buffer_t ob = {room.data(), room.size(), 0};
+          if (c.overused) {
+            ob.used = ob.size + 1;
+          }
+          else {
+            ob.data = nullptr;
+          }
+          const gcomp_status_t st = which == 0
+              ? gcomp_encoder_finish(enc, &ob)
+              : gcomp_encoder_flush(enc, &ob, GCOMP_FLUSH_SYNC);
+          EXPECT_EQ(st, GCOMP_ERR_INVALID_ARG)
+              << method << (which == 0 ? " finish: " : " flush: ") << c.what;
+          gcomp_encoder_destroy(enc);
+        }
+      }
+
+      // The decoder.
+      {
+        gcomp_decoder_t * dec = nullptr;
+        ASSERT_EQ(gcomp_decoder_create(gcomp_registry_default(), method, nullptr, &dec),
+            GCOMP_OK)
+            << method;
+        gcomp_buffer_t in = {(void *)stream.data(), stream.size(), 0};
+        gcomp_buffer_t ob = {room.data(), room.size(), 0};
+        gcomp_buffer_t * spoil = c.on_input ? &in : &ob;
+        if (c.overused) {
+          spoil->used = spoil->size + 1;
+        }
+        else {
+          spoil->data = nullptr;
+        }
+        EXPECT_EQ(gcomp_decoder_update(dec, &in, &ob), GCOMP_ERR_INVALID_ARG)
+            << method << " decoder update: " << c.what;
+        EXPECT_STREQ(gcomp_decoder_get_error_detail(dec), c.detail)
+            << method << " decoder update: " << c.what;
+        if (c.on_input || !c.overused) {
+          EXPECT_EQ(ob.used, 0u)
+              << method << " decoder update: " << c.what << ": wrote anyway";
+        }
+        gcomp_decoder_destroy(dec);
+      }
+
+      if (!c.on_input) {
+        gcomp_decoder_t * dec = nullptr;
+        ASSERT_EQ(gcomp_decoder_create(gcomp_registry_default(), method, nullptr, &dec),
+            GCOMP_OK)
+            << method;
+        gcomp_buffer_t ob = {room.data(), room.size(), 0};
+        if (c.overused) {
+          ob.used = ob.size + 1;
+        }
+        else {
+          ob.data = nullptr;
+        }
+        EXPECT_EQ(gcomp_decoder_finish(dec, &ob), GCOMP_ERR_INVALID_ARG)
+            << method << " decoder finish: " << c.what;
+        gcomp_decoder_destroy(dec);
+      }
+    }
+  }
+}
+
+/**
+ * @brief A fully consumed input buffer is not an inconsistent one.
+ *
+ * The documented streaming loop (stream.h) offers "the same input buffer and
+ * a drained output buffer until `input` is used up", so `used == size` is the
+ * normal end of that loop and arrives at update() on every call after the
+ * input runs out. A check that read `used == size` as a contradiction would
+ * break every caller that follows the documented loop, so the boundary is
+ * asserted from the valid side as well as the invalid one.
+ */
+TEST(StreamBufferArguments, AFullyConsumedInputBufferIsAccepted) {
+  std::vector<uint8_t> data(64, 'c');
+  for (const char * method :
+      {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli"}) {
+    gcomp_encoder_t * enc = nullptr;
+    ASSERT_EQ(
+        gcomp_encoder_create(gcomp_registry_default(), method, nullptr, &enc),
+        GCOMP_OK)
+        << method;
+    std::vector<uint8_t> room(4096);
+
+    // Everything offered, everything taken: the call the loop makes last.
+    gcomp_buffer_t spent = {(void *)data.data(), data.size(), data.size()};
+    gcomp_buffer_t ob = {room.data(), room.size(), 0};
+    EXPECT_EQ(gcomp_encoder_update(enc, &spent, &ob), GCOMP_OK) << method;
+
+    // And a zero-length output buffer, which the loop also produces once the
+    // caller has nowhere to put the bytes: not an error, just no progress.
+    gcomp_buffer_t none = {room.data(), 0, 0};
+    const gcomp_status_t st = gcomp_encoder_update(enc, &spent, &none);
+    EXPECT_TRUE(st == GCOMP_OK || st == GCOMP_ERR_LIMIT)
+        << method << ": status " << (int)st;
+    EXPECT_EQ(none.used, 0u) << method;
+    gcomp_encoder_destroy(enc);
+  }
 }
 
 int main(int argc, char ** argv) {

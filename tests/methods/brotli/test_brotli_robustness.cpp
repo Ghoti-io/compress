@@ -388,10 +388,14 @@ TEST_F(BrotliRobustnessTest, DecoderUpdateZeroSizeOutput) {
 }
 
 /**
- * The six argument checks in `buffers_ok`, none of which any test reached.
- * Each one has to be refused with GCOMP_ERR_INVALID_ARG and leave a detail
- * string behind, because a decoder that returns a bare code here is a decoder
- * a caller cannot debug.
+ * The six argument checks, none of which any test reached.
+ *
+ * All six live in the core now: gcomp_decoder_update() refuses a NULL handle
+ * with a bare code, and refuses a buffer whose fields contradict each other
+ * with a message naming the field. They were brotli's own when this test was
+ * written, and brotli was the only method that made any of them - which is
+ * how the encoder side came to have none at all and took a
+ * heap-buffer-overflow for an inconsistent buffer.
  */
 TEST_F(BrotliRobustnessTest, DecoderRefusesInconsistentBuffers) {
   const uint8_t text[] = "argument checks";
@@ -440,10 +444,9 @@ TEST_F(BrotliRobustnessTest, DecoderRefusesInconsistentBuffers) {
         c.null_input ? nullptr : &in, c.null_output ? nullptr : &ob);
     EXPECT_EQ(st, GCOMP_ERR_INVALID_ARG) << c.what;
     const char * detail = gcomp_decoder_get_error_detail(dec);
-    // A NULL buffer pointer is refused by gcomp_decoder_update itself, before
-    // any method sees it, and that layer sets no detail - which is why the
-    // two arms brotli used to spell for this case were unreachable and are
-    // gone. Everything the method does answer says what was wrong.
+    // A NULL buffer pointer is refused before there is a buffer to describe,
+    // so that case carries no detail. Everything else says which field was
+    // wrong.
     if (c.null_input || c.null_output) {
       EXPECT_TRUE(detail == nullptr || detail[0] == '\0')
           << c.what << ": the core layer grew a detail string";
