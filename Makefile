@@ -3359,6 +3359,9 @@ coverage: ## Build instrumented, run the tests, and report line coverage
 		EXTRA_CFLAGS="--coverage -O0" \
 		EXTRA_LDFLAGS="--coverage" > /dev/null || status=$$?; \
 	if [ $$status -eq 0 ]; then \
+		tools/coverage.sh --self-test || status=$$?; \
+	fi; \
+	if [ $$status -eq 0 ]; then \
 		tools/coverage.sh $(OBJ_DIR) || status=$$?; \
 	else \
 		printf "coverage: the instrumented test run failed; no report\n" >&2; \
