@@ -752,10 +752,55 @@ void add_scenarios(std::vector<Scenario> & out) {
       Mode::StreamingTiny, false, 256});
   out.push_back({"rle/buffer", "rle", nullptr, runs, Mode::Buffer, false});
 
+  // brotli: both levels, because they are two encoders.  Level 0 stores
+  // meta-blocks and allocates almost nothing; level 1 builds LZ77 commands, a
+  // hash chain and three Huffman codes per block, and every one of those
+  // allocations has a failure arm that was never taken - the two scenarios
+  // here were both at the default level on compressible text, so the store
+  // fallback and the whole prefix-code path went unvisited.
+  //
+  // A block larger than one chunk, incompressible input (which makes the
+  // encoder abandon the compressed form and store), and the smallest window
+  // are each a different shape of the same sweep.
+  const std::vector<uint8_t> brotli_long = make_mixed(300 * 1024);
+  auto brotli_level = [](int64_t level) {
+    return [level](gcomp_options_t * o) {
+      gcomp_options_set_int64(o, "brotli.level", level);
+    };
+  };
+  auto brotli_level_window = [](int64_t level, int64_t lgwin) {
+    return [level, lgwin](gcomp_options_t * o) {
+      gcomp_options_set_int64(o, "brotli.level", level);
+      gcomp_options_set_int64(o, "brotli.lgwin", lgwin);
+    };
+  };
+
   out.push_back(
       {"brotli/text", "brotli", nullptr, text, Mode::StreamingTiny, false});
   out.push_back(
       {"brotli/buffer", "brotli", nullptr, text, Mode::Buffer, false});
+  out.push_back({"brotli/L0/text", "brotli", brotli_level(0), text,
+      Mode::StreamingTiny, true});
+  out.push_back({"brotli/L1/text", "brotli", brotli_level(1), text,
+      Mode::StreamingTiny, true});
+  out.push_back({"brotli/L1/runs", "brotli", brotli_level(1), runs,
+      Mode::StreamingTiny, false});
+  out.push_back({"brotli/L1/random", "brotli", brotli_level(1), rnd,
+      Mode::StreamingTiny, false});
+  out.push_back({"brotli/L1/mixed-long", "brotli", brotli_level(1),
+      brotli_long, Mode::StreamingTiny, false});
+  out.push_back({"brotli/L1/lgwin10", "brotli", brotli_level_window(1, 10),
+      mixed, Mode::StreamingTiny, false});
+  out.push_back({"brotli/L1/lgwin24", "brotli", brotli_level_window(1, 24),
+      mixed, Mode::StreamingTiny, false});
+  out.push_back({"brotli/L1/buffer", "brotli", brotli_level(1), mixed,
+      Mode::Buffer, false});
+  out.push_back({"brotli/L0/buffer", "brotli", brotli_level(0), rnd,
+      Mode::Buffer, false});
+  out.push_back({"brotli/L1/tiny", "brotli", brotli_level(1), tiny,
+      Mode::StreamingTiny, true});
+  out.push_back({"brotli/L1/empty", "brotli", brotli_level(1), empty,
+      Mode::StreamingTiny, true});
 }
 
 //
