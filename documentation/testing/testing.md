@@ -361,6 +361,11 @@ tests/
 │   ├── test_passthru.cpp         # Pass-thru method tests
 │   └── test_stress.cpp           # Stress and stability tests
 ├── methods/
+│   ├── brotli/                   # Brotli method tests
+│   │   ├── test_brotli.cpp       # Format, levels, windows, libbrotli oracle
+│   │   ├── test_brotli_encoder.cpp # Arguments, reset, back-pressure, skewed alphabets
+│   │   ├── test_brotli_register.cpp # peek across every window; table bounds
+│   │   └── test_brotli_robustness.cpp # Hand-built streams, corruption sweep
 │   ├── deflate/                  # Deflate method tests
 │   │   ├── test_deflate_bitio.cpp
 │   │   ├── test_deflate_decoder.cpp

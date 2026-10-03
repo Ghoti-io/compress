@@ -169,6 +169,30 @@ private:
 
 } // namespace
 
+/**
+ * @brief The reference this file compares against is really here.
+ *
+ * Six tests below hand a stream to libbrotli inside `if (lib.ok())`, and one
+ * skips without it. On a machine with no libbrotli every one of those
+ * comparisons silently becomes a no-op and the file still reports all green,
+ * which is a sweep that cannot see returning clean. This asserts rather than
+ * skips, and check-oracle-coverage requires a suite carrying this sentinel to
+ * be named in ORACLE_TEST_NAMES, which is what puts it in
+ * `make check-oracle`.
+ */
+TEST(BrotliRobustness, LibbrotliIsActuallyAvailable) {
+  if (const char * skip = std::getenv("GCOMP_SKIP_ORACLE_TESTS")) {
+    if (skip[0] == '1') {
+      GTEST_SKIP() << "Oracle tests disabled via GCOMP_SKIP_ORACLE_TESTS";
+    }
+  }
+  ASSERT_TRUE(brotli_lib().ok())
+      << "libbrotlienc.so.1 and libbrotlidec.so.1 could not be loaded. The "
+         "pinned copies are in the oracle image; `make check-oracle` runs "
+         "this binary there. Set GCOMP_SKIP_ORACLE_TESTS=1 to skip this on a "
+         "machine that has no libbrotli.";
+}
+
 class BrotliRobustnessTest : public ::testing::Test {
 protected:
   void SetUp() override {
