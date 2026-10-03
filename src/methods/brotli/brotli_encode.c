@@ -223,19 +223,19 @@ gcomp_status_t brotli_encoder_init(gcomp_registry_t * registry,
   int64_t lgwin = 16;
   int64_t level = 1;
 
-  if (options &&
-      gcomp_options_get_int64(options, "brotli.lgwin", &lgwin) == GCOMP_OK) {
-    if (lgwin < 10 || lgwin > 24) {
-      return gcomp_encoder_set_error(encoder, GCOMP_ERR_INVALID_ARG,
-          "brotli.lgwin must be from 10 to 24");
-    }
-  }
-  if (options &&
-      gcomp_options_get_int64(options, "brotli.level", &level) == GCOMP_OK) {
-    if (level < 0 || level > 1) {
-      return gcomp_encoder_set_error(encoder, GCOMP_ERR_INVALID_ARG,
-          "brotli.level must be 0 or 1");
-    }
+  /* The ranges are the schema's: gcomp_encoder_create() validates the
+   * caller's options against g_brotli_option_schemas before this runs, so an
+   * lgwin outside 10..24 or a level outside 0..1 is refused with
+   * GCOMP_ERR_INVALID_ARG before the method sees it. Repeating the check here
+   * spelled two arms no input could reach, which is worse than none: the
+   * numbers would drift apart with nothing to say so. What keeps them honest
+   * is that the schema's range is what write_wbits can express -
+   * OptionValidationTest.MistakesAreRejectedAtCreateTime asserts the refusal
+   * at each boundary, and BrotliRegisterTest.PeekReadsEveryWindowTheEncoderWrites
+   * asserts that all fifteen windows inside it come back distinct. */
+  if (options) {
+    (void)gcomp_options_get_int64(options, "brotli.lgwin", &lgwin);
+    (void)gcomp_options_get_int64(options, "brotli.level", &level);
   }
   st = gcomp_calloc(alloc, 1, sizeof(*st));
   if (!st) {

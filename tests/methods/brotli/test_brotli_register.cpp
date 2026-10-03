@@ -236,6 +236,42 @@ TEST(BrotliRegister, TheTransformTableHasExactlyItsDefinedRange) {
   EXPECT_EQ(brotli_xform(1 << 20), nullptr);
 }
 
+/// Registering into nothing is an argument error, not a crash.
+TEST(BrotliRegister, RegisteringWithNoRegistryIsRefused) {
+  EXPECT_EQ(gcomp_method_brotli_register(nullptr), GCOMP_ERR_INVALID_ARG);
+}
+
+/**
+ * @brief Registering twice into one registry is idempotent.
+ *
+ * `gcomp_registry_register()` finds the name already there and returns
+ * GCOMP_OK without adding a second entry, so this asserts GCOMP_OK rather
+ * than "OK or an error", which is what the sibling register suites accept and
+ * what cannot fail if the behaviour changes. brotli auto-registers with the
+ * default registry, so a caller who also calls the register function by hand -
+ * which the module documentation tells them to do for a registry of their own -
+ * gets this path.
+ */
+TEST(BrotliRegister, RegisteringTwiceIsIdempotent) {
+  gcomp_registry_t * reg = nullptr;
+  ASSERT_EQ(gcomp_registry_create(nullptr, &reg), GCOMP_OK);
+  ASSERT_EQ(gcomp_method_brotli_register(reg), GCOMP_OK);
+  EXPECT_EQ(gcomp_method_brotli_register(reg), GCOMP_OK);
+
+  // The same descriptor is still the one in the registry, and still works.
+  const gcomp_method_t * method = gcomp_registry_find(reg, "brotli");
+  ASSERT_NE(method, nullptr);
+  EXPECT_STREQ(method->name, "brotli");
+  const uint8_t data[] = "registered once";
+  std::vector<uint8_t> out(256);
+  size_t written = 0;
+  EXPECT_EQ(gcomp_encode_buffer(reg, "brotli", nullptr, data, sizeof(data),
+                out.data(), out.size(), &written),
+      GCOMP_OK);
+  EXPECT_GT(written, 0u);
+  gcomp_registry_destroy(reg);
+}
+
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

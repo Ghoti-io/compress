@@ -487,6 +487,23 @@ static int put_canon(brotli_bw_t * b, const brotli_canon_t * c) {
   return brotli_bw_put(b, c->code, (int)c->len);
 }
 
+/* The six code lengths of the code-length code, in the fixed code of RFC 7932
+ * section 3.5, each already reversed so one brotli_bw_put writes it.
+ *
+ * `case 5` is never taken, for a reason worth writing down rather than
+ * leaving as a cold line. These values come from assign_balanced() over the
+ * 18 code-length symbols, which assigns ceil_log2(nnz) bits, so a 5 needs 17
+ * or 18 of them live. plan_lengths() never emits symbol 16, so the ceiling is
+ * 17: all fifteen lengths 1..15, plus symbol 0 for a single zero and symbol
+ * 17 for a run of them. That needs a prefix code 15 deep that also uses
+ * length 1 - one symbol holding more than half the weight, with fifteen
+ * halvings below it, which is the Fibonacci chain exactly. Measured over
+ * every input in the brotli suites and a search besides, the most that is
+ * reached is 16 live symbols, and the one always missing is length 1: a
+ * literal frequent enough to earn a one-bit code recurs often enough that
+ * the matcher turns those occurrences into copies, which takes it back below
+ * half. The arm is correct and stays; what would make it live is a histogram
+ * the matcher does not flatten. */
 static int write_cl_static(brotli_bw_t * b, int v) {
   switch (v) {
   case 0:

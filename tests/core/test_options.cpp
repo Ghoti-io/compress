@@ -508,6 +508,28 @@ void setOutOfRange(gcomp_options_t * o) {
 void setValid(gcomp_options_t * o) {
   gcomp_options_set_uint64(o, "lz4.block_size", 65536);
 }
+// brotli's window and level, at each boundary.  The method used to repeat
+// these ranges in brotli_encoder_init() and the repetition was unreachable,
+// because this validation runs first; the ranges live only in the schema now,
+// so the boundary has to be asserted through the public entry point.
+void setBrotliWindowBelowMin(gcomp_options_t * o) {
+  gcomp_options_set_int64(o, "brotli.lgwin", 9);
+}
+void setBrotliWindowAboveMax(gcomp_options_t * o) {
+  gcomp_options_set_int64(o, "brotli.lgwin", 25);
+}
+void setBrotliWindowAtMin(gcomp_options_t * o) {
+  gcomp_options_set_int64(o, "brotli.lgwin", 10);
+}
+void setBrotliWindowAtMax(gcomp_options_t * o) {
+  gcomp_options_set_int64(o, "brotli.lgwin", 24);
+}
+void setBrotliLevelBelowMin(gcomp_options_t * o) {
+  gcomp_options_set_int64(o, "brotli.level", -1);
+}
+void setBrotliLevelAboveMax(gcomp_options_t * o) {
+  gcomp_options_set_int64(o, "brotli.level", 2);
+}
 void setZeroOutputAndRatio(gcomp_options_t * o) {
   gcomp_options_set_uint64(o, "limits.max_output_bytes", 0);
   gcomp_options_set_uint64(o, "limits.max_expansion_ratio", 0);
@@ -546,6 +568,18 @@ TEST(OptionValidationTest, MistakesAreRejectedAtCreateTime) {
           GCOMP_ERR_INVALID_ARG},
       {"deflate.level as int64", "deflate", setDeflateLevel, GCOMP_OK},
       {"deflate.level as uint64", "deflate", setDeflateLevelWrongType,
+          GCOMP_ERR_INVALID_ARG},
+      {"brotli.lgwin below the minimum", "brotli", setBrotliWindowBelowMin,
+          GCOMP_ERR_INVALID_ARG},
+      {"brotli.lgwin above the maximum", "brotli", setBrotliWindowAboveMax,
+          GCOMP_ERR_INVALID_ARG},
+      {"brotli.lgwin at the minimum", "brotli", setBrotliWindowAtMin,
+          GCOMP_OK},
+      {"brotli.lgwin at the maximum", "brotli", setBrotliWindowAtMax,
+          GCOMP_OK},
+      {"brotli.level below the minimum", "brotli", setBrotliLevelBelowMin,
+          GCOMP_ERR_INVALID_ARG},
+      {"brotli.level above the maximum", "brotli", setBrotliLevelAboveMax,
           GCOMP_ERR_INVALID_ARG},
   };
 
