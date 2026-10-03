@@ -219,7 +219,16 @@ static gcomp_status_t brotli_encode_bound(gcomp_options_t * options,
     *bound_out = 2;
     return GCOMP_OK;
   }
-  blocks = (input_size + 65535u) / 65536u;
+  /* Through the shared helper rather than by hand: (input_size + 65535) wraps
+   * for the largest few thousand size_t values, and a wrapped sum divided by
+   * the block size gave a block count of zero. The bound then charged nothing
+   * for the per-block headers and was reported as GCOMP_OK, which is the one
+   * failure bound_internal.h says must not happen - a caller sizing a buffer
+   * from it would get one smaller than its own input. */
+  s = gcomp_bound_block_count(input_size, BROTLI_STORE, &blocks);
+  if (s != GCOMP_OK) {
+    return s;
+  }
   bound = 2;
   s = gcomp_bound_add(&bound, input_size);
   if (s == GCOMP_OK) {

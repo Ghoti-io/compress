@@ -43,6 +43,13 @@
 extern "C" {
 #endif
 
+/* The format's uncompressed meta-block limit, RFC 7932 section 9.2: MLEN is
+ * 16 bits for a stored block, so one holds at most 65536 bytes. Shared
+ * because brotli_encode.c splits on it and brotli_register.c's encode_bound
+ * counts the block headers it implies; two copies of this number would let
+ * the bound describe a block size the encoder does not use. */
+#define BROTLI_STORE 65536u
+
 #define BROTLI_DICT_SIZE 122784
 #define BROTLI_MAX_ALPHABET 704
 #define BROTLI_WINDOW_MAX_BITS 24

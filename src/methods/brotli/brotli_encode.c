@@ -45,7 +45,6 @@
 
 #include <string.h>
 
-#define BROTLI_STORE 65536u
 /* A compressed meta-block may be longer than an uncompressed one. One block
  * for this much input pays the Huffman header once; the store fallback still
  * splits at BROTLI_STORE, which is the format's uncompressed-block limit. */

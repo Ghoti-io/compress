@@ -686,6 +686,50 @@ TEST(EncodeBound, RejectsBadArguments) {
       GCOMP_ERR_UNSUPPORTED);
 }
 
+/**
+ * @brief An input size whose bound cannot be represented is refused.
+ *
+ * bound_internal.h: "A bound that silently wrapped would be worse than no
+ * bound at all: the caller would allocate a small buffer and believe it was
+ * big enough. Overflow is reported as GCOMP_ERR_LIMIT."
+ *
+ * No buffer this large exists, which is exactly why this has to be asserted
+ * rather than observed: the arithmetic is reached by a caller passing a size
+ * it computed, and a size computed wrongly is how an attacker gets a short
+ * buffer. The sizes below are chosen to overflow at a different step for
+ * different formats - near SIZE_MAX the input itself does not fit, and a
+ * little below it the per-block framing is what does not.
+ *
+ * Returning GCOMP_OK here is the failure being guarded against, so the
+ * assertion is on the status and not merely on "did not crash". brotli
+ * computed its block count by hand instead of through
+ * gcomp_bound_block_count(), and that addition wrapped: for SIZE_MAX - 1000
+ * it reported a block count of zero, charged nothing for the block headers,
+ * and answered GCOMP_OK with a bound smaller than the input.
+ */
+TEST(EncodeBound, AnUnrepresentableBoundIsRefused) {
+  const size_t kMax = (size_t)-1;
+  for (const char * method :
+      {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli"}) {
+    // Each of these is larger than SIZE_MAX minus the framing every format
+    // here charges for an input that long, so none of their bounds fits in a
+    // size_t. Three quarters of SIZE_MAX does fit for several of them, which
+    // is why the sizes stop where they do.
+    for (size_t n : {kMax, kMax - 1, kMax - 1000, kMax - 65536}) {
+      size_t bound = 12345;
+      gcomp_status_t st =
+          gcomp_encode_bound(nullptr, method, nullptr, n, &bound);
+      // Non-fatal, so one method's wrap does not hide the others'.
+      EXPECT_NE(st, GCOMP_OK)
+          << method << ": bound for " << n << " reported OK as " << bound;
+      if (st != GCOMP_OK) {
+        EXPECT_EQ(st, GCOMP_ERR_LIMIT)
+            << method << ": overflow is GCOMP_ERR_LIMIT (bound_internal.h)";
+      }
+    }
+  }
+}
+
 /// Zero in, something out: every framed format still writes its frame.
 TEST(EncodeBound, EmptyInput) {
   for (const char * method :

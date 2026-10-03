@@ -345,16 +345,41 @@ static gcomp_status_t lzw_encode_bound(
   uint64_t reserved = ((uint64_t)1u << lit_width) + 2u;
   uint64_t span = (table > reserved) ? table - reserved : 1u;
 
-  uint64_t codes = (uint64_t)input_size;
-  codes += 2u;                              // opening Clear, closing EOI
-  codes += ((uint64_t)input_size / span) + 1u; // Clears as the table refills
-
-  uint64_t bits = codes * max_code_bits;
-  uint64_t bytes = (bits + 7u) / 8u + 1u;
-  if (bytes > (uint64_t)(size_t)-1) {
-    return GCOMP_ERR_LIMIT;
+  // Through the checked helpers, every step.  This used to do its own uint64
+  // arithmetic and range-check only the final byte count, which the wrap
+  // defeated: `codes * max_code_bits` overflows for an input a little under
+  // SIZE_MAX, so the check saw a small number and the function answered
+  // GCOMP_OK with a bound 2560 times smaller than the input it was asked
+  // about.  bound_internal.h: a bound that silently wrapped is worse than no
+  // bound at all, because the caller allocates to it and believes it.
+  size_t codes = 0;
+  gcomp_status_t s = gcomp_bound_add(&codes, input_size);
+  if (s == GCOMP_OK) {
+    s = gcomp_bound_add(&codes, 3u); // opening Clear, closing EOI, and the
+                                     // partial span the division rounds off
   }
-  *bound_out = (size_t)bytes;
+  if (s == GCOMP_OK) {
+    s = gcomp_bound_add(&codes, (size_t)((uint64_t)input_size / span));
+  }
+  if (s != GCOMP_OK) {
+    return s;
+  }
+
+  size_t bits = 0;
+  s = gcomp_bound_add_mul(&bits, codes, (size_t)max_code_bits);
+  if (s == GCOMP_OK) {
+    s = gcomp_bound_add(&bits, 7u);
+  }
+  if (s != GCOMP_OK) {
+    return s;
+  }
+
+  size_t bytes = bits / 8u;
+  s = gcomp_bound_add(&bytes, 1u);
+  if (s != GCOMP_OK) {
+    return s;
+  }
+  *bound_out = bytes;
   return GCOMP_OK;
 }
 
