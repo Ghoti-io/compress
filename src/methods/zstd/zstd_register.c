@@ -385,27 +385,33 @@ static const gcomp_option_schema_t g_zstd_option_schemas[] = {
     },
 };
 
+/* One entry per g_zstd_option_schemas entry, in the same order: the schema
+ * descriptor publishes num_options from the schema array and this array as
+ * the key list, so a caller pairing keys[i] with options[i] gets the wrong
+ * help, type and range for every entry the two disagree on.  This list and
+ * that one had drifted apart over window_log, job_size, threads.count and
+ * the limits block.  Append here and there together. */
 static const char * const g_zstd_option_keys[] = {
     "zstd.level",
     "zstd.checksum",
     "zstd.seekable",
     "zstd.seekable_frame_size",
     "zstd.seekable_checksum",
-    "zstd.window_log",
     "zstd.long",
     "zstd.ldm_min_match",
     "zstd.ldm_hash_log",
     "zstd.ldm_hash_rate_log",
+    "zstd.window_log",
     "zstd.content_size",
     "zstd.concat",
     "zstd.dictionary",
     "zstd.dictionary_id",
-    "zstd.job_size",
-    "threads.count",
     "limits.max_output_bytes",
     "limits.max_window_bytes",
     "limits.max_memory_bytes",
     "limits.max_expansion_ratio",
+    "threads.count",
+    "zstd.job_size",
 };
 
 static const gcomp_method_schema_t g_zstd_schema = {

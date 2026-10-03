@@ -132,8 +132,14 @@ static const gcomp_option_schema_t g_brotli_option_schemas[] = {
     },
 };
 
+/* One entry per g_brotli_option_schemas entry, in the same order: the schema
+ * descriptor publishes num_options from the schema array and this array as
+ * the key list, so a short or reordered list is read out of bounds.
+ * SchemaAllMethodsTest.EveryKeyArrayMatchesItsSchema checks that for every
+ * method, because brotli.level was missing here. */
 static const char * const g_brotli_option_keys[] = {
     "brotli.lgwin",
+    "brotli.level",
     "limits.max_output_bytes",
     "limits.max_memory_bytes",
     "limits.max_expansion_ratio",

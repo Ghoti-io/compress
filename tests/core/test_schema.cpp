@@ -380,6 +380,56 @@ TEST(SchemaDeflateTest, OptionsValidate_DeflateLevelOutOfRange) {
   gcomp_registry_destroy(reg);
 }
 
+// Every method's own key array, against its own schema.
+//
+// gcomp_method_schema_s::keys is documented as "an array of num_options
+// pointers, each matching the corresponding gcomp_option_schema_s::key", and
+// nothing checked that for a real method: GetOptionKeys_Success above tests
+// the dummy method defined in this file, whose two arrays this file wrote
+// together and got right.  The methods keep the two lists by hand, metres
+// apart in one file, and brotli's had drifted -- the keys array was missing
+// brotli.level, so it held five pointers while num_options said six.  A
+// caller enumerating brotli's options read one past the end of a static
+// array, and every key from the second on named the wrong option.
+//
+// The sweep is over the default registry, which is what a caller gets from
+// gcomp_registry_default(); each method is named so a failure says which.
+TEST(SchemaAllMethodsTest, EveryKeyArrayMatchesItsSchema) {
+  gcomp_registry_t * reg = gcomp_registry_default();
+  ASSERT_NE(reg, nullptr);
+
+  size_t checked = 0;
+  for (const char * name : {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw",
+           "rle", "brotli"}) {
+    const gcomp_method_t * method = gcomp_registry_find(reg, name);
+    ASSERT_NE(method, nullptr) << name;
+
+    const gcomp_method_schema_t * schema = nullptr;
+    ASSERT_EQ(gcomp_method_get_all_schemas(method, &schema), GCOMP_OK) << name;
+    ASSERT_NE(schema, nullptr) << name;
+
+    const char * const * keys = nullptr;
+    size_t count = 0;
+    ASSERT_EQ(gcomp_method_get_option_keys(method, &keys, &count), GCOMP_OK)
+        << name;
+    ASSERT_EQ(count, schema->num_options) << name;
+    ASSERT_NE(keys, nullptr) << name;
+
+    for (size_t i = 0; i < count; i++) {
+      // Reading keys[i] for every i up to count is the point as much as the
+      // comparison is: a short array is an out-of-bounds read here, which
+      // ASan reports as a global-buffer-overflow.
+      ASSERT_NE(keys[i], nullptr) << name << " key " << i;
+      ASSERT_NE(schema->options[i].key, nullptr) << name << " schema " << i;
+      EXPECT_STREQ(keys[i], schema->options[i].key)
+          << name << ": keys[" << i << "] does not name options[" << i << "]";
+    }
+    checked += count;
+  }
+  // A registry that answered with nothing would pass every assertion above.
+  EXPECT_GT(checked, 50u) << "the sweep saw too few options to mean anything";
+}
+
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
