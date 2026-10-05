@@ -66,8 +66,8 @@ typedef enum {
 /**
  * @brief Policy for handling unknown option keys during validation.
  *
- * This controls how @ref gcomp_options_validate() treats keys that are present
- * in a @ref gcomp_options_t instance but not described by a method's option
+ * This controls how `gcomp_options_validate()` treats keys that are present
+ * in a `gcomp_options_t` instance but not described by a method's option
  * schema.
  */
 typedef enum {
@@ -328,7 +328,7 @@ GCOMP_API gcomp_status_t gcomp_options_validate(
 /**
  * @brief Validate a single option key against a method's option schema.
  *
- * This behaves similarly to @ref gcomp_options_validate(), but only checks
+ * This behaves similarly to `gcomp_options_validate()`, but only checks
  * the specified key. If the key is not present in @p options, this function
  * returns ::GCOMP_ERR_INVALID_ARG.
  *

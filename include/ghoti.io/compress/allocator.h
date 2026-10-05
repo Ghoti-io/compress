@@ -23,7 +23,7 @@
  *
  * Allocator abstraction for the Ghoti.io Compress library.
  *
- * This is cutil's @ref GCU_Allocator under a local name. The two were
+ * This is cutil's `GCU_Allocator` under a local name. The two were
  * identical - same four function pointers, same context argument, same
  * semantics - and having one definition means an allocator written for any
  * library in the suite works with all of them, rather than needing a

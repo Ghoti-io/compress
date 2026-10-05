@@ -177,12 +177,12 @@ GCOMP_API gcomp_status_t gcomp_encode_bound(gcomp_registry_t * registry,
  *
  * Filled by gcomp_peek(). Every field is read out of the header; nothing is
  * inferred and nothing is decoded. A format that does not carry a field leaves
- * it zero - which is why @ref has_content_size and @ref has_dictionary exist
+ * it zero - which is why `has_content_size` and `has_dictionary` exist
  * separately from the values they guard, since zero is a legitimate content
  * size and a legitimate dictionary ID.
  *
  * Three formats have no header at all (deflate, LZW, RLE). For
- * those, @ref header_size is zero and only @ref window_size is meaningful.
+ * those, `header_size` is zero and only `window_size` is meaningful.
  */
 typedef struct gcomp_stream_info_s {
   /**

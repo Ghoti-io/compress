@@ -98,18 +98,24 @@ typedef struct gcomp_option_schema_s {
    * These currently apply only to integer and unsigned integer types.
    */
   int has_min;
+
+  /// Nonzero when the maximum constraint applies (see @c has_min).
   int has_max;
 
   /**
    * @brief Integer constraints (for ::GCOMP_OPT_INT64).
    */
   int64_t min_int;
+
+  /// Largest accepted value for a ::GCOMP_OPT_INT64 option.
   int64_t max_int;
 
   /**
    * @brief Unsigned integer constraints (for ::GCOMP_OPT_UINT64).
    */
   uint64_t min_uint;
+
+  /// Largest accepted value for a ::GCOMP_OPT_UINT64 option.
   uint64_t max_uint;
 
   /**
@@ -124,7 +130,7 @@ typedef struct gcomp_option_schema_s {
    * the option takes any string, which is the right answer for a filename or
    * a comment but the wrong one for a mode selector.
    *
-   * Declaring them is what lets @ref gcomp_options_validate() refuse a bad
+   * Declaring them is what lets `gcomp_options_validate()` refuse a bad
    * value where the caller set it, naming the key, rather than leaving the
    * method to fail later with a message about something further downstream.
    * It is also the only way a caller can discover the set by introspection
@@ -236,7 +242,7 @@ struct gcomp_method_s {
    * @brief Retrieve the option schema for this method.
    *
    * Methods that support option introspection must implement this hook
-   * and return a pointer to a static @ref gcomp_method_schema_t instance.
+   * and return a pointer to a static `gcomp_method_schema_t` instance.
    * Methods that do not support introspection may leave this as @c NULL.
    *
    * @return Pointer to the method's schema, or NULL if not available.
