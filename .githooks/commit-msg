@@ -17,7 +17,11 @@ MSG_FILE="$1"
 [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || exit 0
 
 # Assistant names / vendors used to identify machine attribution.
-AGENTS='claude|anthropic|cursor|copilot|codex|aider|devin|windsurf|sourcegraph|cody|tabnine|codeium|chatgpt|openai|gemini|google-labs-jules'
+# Whole words only: "Cody" and "Devin" are also people's names, and a human
+# co-author whose name contains one of these must survive.
+NAMES='claude|anthropic|cursor|copilot|codex|aider|devin|windsurf|sourcegraph|cody|tabnine|codeium|chatgpt|openai|gemini|google-labs-jules'
+AGENTS="\\b($NAMES)\\b"
+AGENTS_LEAD="\\b($NAMES)" # no trailing boundary: "cursor_session:" is one word
 
 WORK="$MSG_FILE.hook.$$"
 trap 'rm -f "$WORK" "$WORK.tmp"' EXIT
@@ -28,10 +32,10 @@ trap 'rm -f "$WORK" "$WORK.tmp"' EXIT
 #    - session / conversation id trailers
 #    - a lone robot-emoji line left behind by some tools
 grep -v -i -E \
-  -e "^[[:space:]]*(co-authored-by|signed-off-by|assisted-by|authored-by|created-by|generated-by)[[:space:]]*:.*($AGENTS)" \
-  -e "^[[:space:]]*(.{0,4}[[:space:]]*)?(generated|co-authored|written|created|assisted)[[:space:]]+(with|by)[[:space:]]+\[?($AGENTS)" \
-  -e "^[[:space:]]*($AGENTS)[-_ ]?(code[-_ ]?)?(session|conversation|thread|chat|request|trace)[-_ ]?(id|url|link)?[[:space:]]*:" \
-  -e "^[[:space:]]*(session|conversation)[-_ ]?id[[:space:]]*:.*($AGENTS)" \
+  -e "^[[:space:]]*(co-authored-by|signed-off-by|assisted-by|authored-by|created-by|generated-by)[[:space:]]*:.*$AGENTS" \
+  -e "^[[:space:]]*(.{0,4}[[:space:]]*)?(generated|co-authored|written|created|assisted)[[:space:]]+(with|by)[[:space:]]+\[?$AGENTS" \
+  -e "^[[:space:]]*$AGENTS_LEAD[-_ ]?(code[-_ ]?)?(session|conversation|thread|chat|request|trace)[-_ ]?(id|url|link)?[[:space:]]*:" \
+  -e "^[[:space:]]*(session|conversation)[-_ ]?id[[:space:]]*:.*$AGENTS" \
   -e "^[[:space:]]*🤖[[:space:]]*$" \
   "$MSG_FILE" > "$WORK" || true
 
