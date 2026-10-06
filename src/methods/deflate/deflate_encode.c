@@ -4208,7 +4208,17 @@ gcomp_status_t gcomp_deflate_encoder_flush(
     // A flush renders more than one batch can: every symbol still buffered,
     // every byte of lookahead as a literal, and the marker.  That is what
     // finish() sizes itself for, so size this the same way.
+    //
+    // It is also the buffer update() stages into, and update() allocates only
+    // when there is none.  A flush before the first update() therefore has to
+    // leave a buffer a worst-case block fits in; sized from the finish
+    // estimate alone it held a few dozen bytes, and the next large update()
+    // stopped every batch at once and failed with GCOMP_ERR_LIMIT.
     size_t need = deflate_estimate_finish_size(st) + 16u;
+    const size_t block = deflate_max_block_bytes(st);
+    if (need < block) {
+      need = block;
+    }
     if (st->pending_size < need) {
       uint8_t * grown = (uint8_t *)gcomp_malloc(alloc, need);
       if (!grown) {

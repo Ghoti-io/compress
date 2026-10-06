@@ -333,6 +333,68 @@ TEST_F(FlushTest, FlushingWithNothingBufferedIsNotAnError) {
   }
 }
 
+/**
+ * A flush before the first update() must leave the encoder able to take input
+ * of any size.  deflate sized its staging buffer from the flush, which holds
+ * nothing, and update() skipped its own allocation because a buffer existed,
+ * so the next large update failed with GCOMP_ERR_LIMIT.  The input is larger
+ * than any method's block or chunk, in both modes and at each end of the
+ * level range where a method has one, and the stream is decoded to compare the bytes.
+ */
+TEST_F(FlushTest, AFlushBeforeTheFirstUpdateLeavesRoomForALargeOne) {
+  const std::vector<uint8_t> data = MakeMixedData(1u << 20);
+  for (const char * method : kMethods) {
+    for (gcomp_flush_t mode : {GCOMP_FLUSH_SYNC, GCOMP_FLUSH_FULL}) {
+      for (int level : {-1, 0, 1}) {
+        // -1 is the default; 0 and 1 pick the low and high end of the level
+        // range for the methods that have one.  The rest have one setting.
+        gcomp_options_t * eopts = nullptr;
+        if (level >= 0) {
+          const char * key = nullptr;
+          int64_t lo = 0, hi = 0;
+          if (!strcmp(method, "deflate") || !strcmp(method, "gzip") ||
+              !strcmp(method, "zlib")) {
+            key = "deflate.level", lo = 0, hi = 9;
+          }
+          else if (!strcmp(method, "zstd")) {
+            key = "zstd.level", lo = 1, hi = 19;
+          }
+          else if (!strcmp(method, "brotli")) {
+            key = "brotli.level", lo = 0, hi = 1;
+          }
+          if (!key) {
+            continue;
+          }
+          ASSERT_EQ(gcomp_options_create(&eopts), GCOMP_OK);
+          ASSERT_EQ(gcomp_options_set_int64(eopts, key, level ? hi : lo),
+              GCOMP_OK)
+              << method;
+        }
+        gcomp_encoder_t * encoder = nullptr;
+        ASSERT_EQ(gcomp_encoder_create(registry_, method, eopts, &encoder),
+            GCOMP_OK)
+            << method;
+        if (eopts) {
+          gcomp_options_destroy(eopts);
+        }
+
+        std::vector<uint8_t> stream;
+        FlushAll(encoder, mode, stream);
+        PushAll(encoder, data.data(), data.size(), stream);
+        FinishAll(encoder, stream);
+        gcomp_encoder_destroy(encoder);
+
+        gcomp_options_t * dopts = DecoderOptionsFor(method, mode);
+        EXPECT_EQ(DecodeWhole(method, dopts, stream, data.size()), data)
+            << method << " mode " << mode << " level " << level;
+        if (dopts) {
+          gcomp_options_destroy(dopts);
+        }
+      }
+    }
+  }
+}
+
 /// A finished stream has nothing left to flush into.
 TEST_F(FlushTest, FlushingAfterFinishIsRefused) {
   const std::vector<uint8_t> data = MakeMixedData(5000);
