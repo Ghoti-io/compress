@@ -46,6 +46,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ghoti.io/compress/brotli.h>
+#include <ghoti.io/compress/lzma.h>
 #include <ghoti.io/compress/compress.h>
 #include <ghoti.io/compress/deflate.h>
 #include <ghoti.io/compress/gzip.h>
@@ -441,6 +442,7 @@ const MethodCase k_methods[] = {
     {"lzw", nullptr, 0, GCOMP_LZW_MAX_EXPANSION_RATIO},
     {"rle", nullptr, 0, GCOMP_RLE_MAX_EXPANSION_RATIO},
     {"brotli", "brotli.level", 1, GCOMP_BROTLI_MAX_EXPANSION_RATIO},
+    {"lzma2", "lzma2.preset", 3, GCOMP_LZMA_MAX_EXPANSION_RATIO},
 };
 
 /**

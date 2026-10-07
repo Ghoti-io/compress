@@ -114,6 +114,8 @@ const MethodCase kMethods[] = {
     {"zstd", 64},
     {"lzw", 64},
     {"brotli", 1},
+    {"lzma", 1},
+    {"lzma2", 1},
     // A PackBits literal block is a length byte plus up to 128 bytes, so rle
     // needs 129 bytes of free output to emit one.
     {"rle", 129},

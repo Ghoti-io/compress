@@ -36,6 +36,7 @@
 #include "failing_allocator.h"
 
 #include <ghoti.io/compress/brotli.h>
+#include <ghoti.io/compress/lzma.h>
 #include <ghoti.io/compress/compress.h>
 #include <ghoti.io/compress/deflate.h>
 #include <ghoti.io/compress/gzip.h>
@@ -177,6 +178,12 @@ gcomp_status_t register_all(gcomp_registry_t * reg) {
     return s;
   }
   if ((s = gcomp_method_brotli_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_lzma_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_lzma2_register(reg)) != GCOMP_OK) {
     return s;
   }
   return gcomp_method_zstd_register(reg);
@@ -801,6 +808,53 @@ void add_scenarios(std::vector<Scenario> & out) {
       Mode::StreamingTiny, true});
   out.push_back({"brotli/L1/empty", "brotli", brotli_level(1), empty,
       Mode::StreamingTiny, true});
+
+  // lzma and lzma2 allocate a window, four match-finder tables, the literal
+  // coders and a stage, and lzma2 a snapshot of the model as well. A small
+  // dictionary keeps each of the hundred or so attempts cheap; the 300 KiB
+  // input is past the 128 KiB batch, so the encoder is made to code in the
+  // middle of the stream and not only at the end. Random input drives lzma2's
+  // stored-chunk path, which is the one that copies the snapshot back.
+  auto lzma_opts = [](const char * pre, bool raw) {
+    return [pre, raw](gcomp_options_t * o) {
+      std::string p(pre);
+      gcomp_options_set_int64(o, (p + ".preset").c_str(), 0);
+      gcomp_options_set_uint64(o, (p + ".dict_size").c_str(), 65536);
+      if (raw) {
+        gcomp_options_set_bool(o, "lzma.raw", 1);
+      }
+    };
+  };
+  out.push_back({"lzma/text", "lzma", lzma_opts("lzma", false), text,
+      Mode::StreamingTiny, true});
+  out.push_back({"lzma/runs", "lzma", lzma_opts("lzma", false), runs,
+      Mode::StreamingTiny, false});
+  out.push_back({"lzma/random", "lzma", lzma_opts("lzma", false), rnd,
+      Mode::StreamingTiny, false});
+  out.push_back({"lzma/mixed-long", "lzma", lzma_opts("lzma", false),
+      brotli_long, Mode::StreamingTiny, false});
+  out.push_back({"lzma/raw", "lzma", lzma_opts("lzma", true), mixed,
+      Mode::StreamingTiny, false});
+  out.push_back({"lzma/buffer", "lzma", lzma_opts("lzma", false), mixed,
+      Mode::Buffer, false});
+  out.push_back({"lzma/reset", "lzma", lzma_opts("lzma", false), text,
+      Mode::ResetReuse, false});
+  out.push_back({"lzma/empty", "lzma", lzma_opts("lzma", false), empty,
+      Mode::StreamingTiny, true});
+  out.push_back({"lzma2/text", "lzma2", lzma_opts("lzma2", false), text,
+      Mode::StreamingTiny, true});
+  out.push_back({"lzma2/flush", "lzma2", lzma_opts("lzma2", false), text,
+      Mode::StreamingFlush, true});
+  out.push_back({"lzma2/random", "lzma2", lzma_opts("lzma2", false), rnd,
+      Mode::StreamingTiny, false});
+  out.push_back({"lzma2/mixed-long", "lzma2", lzma_opts("lzma2", false),
+      brotli_long, Mode::StreamingTiny, false});
+  out.push_back({"lzma2/buffer", "lzma2", lzma_opts("lzma2", false), mixed,
+      Mode::Buffer, false});
+  out.push_back({"lzma2/reset", "lzma2", lzma_opts("lzma2", false), text,
+      Mode::ResetReuse, false});
+  out.push_back({"lzma2/empty", "lzma2", lzma_opts("lzma2", false), empty,
+      Mode::StreamingTiny, true});
 }
 
 //
@@ -851,6 +905,12 @@ TEST(AllocFailure, Rle) {
 }
 TEST(AllocFailure, Brotli) {
   sweep_method("brotli");
+}
+TEST(AllocFailure, Lzma) {
+  sweep_method("lzma");
+}
+TEST(AllocFailure, Lzma2) {
+  sweep_method("lzma2");
 }
 
 /**

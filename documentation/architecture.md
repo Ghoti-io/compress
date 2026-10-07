@@ -573,6 +573,7 @@ compress/
 │       │   └── brotli_register.c # Vtable and registration
 │       ├── lzma/
 │       │   ├── lzma_decode.c     # Both decoders: one parse, a carry, a growing window
+│       │   ├── lzma_encode.c     # Range coder, match finder, fast parser, LZMA2 chunks
 │       │   ├── lzma_common.c     # Initial probabilities, the properties byte
 │       │   └── lzma_register.c   # Vtables and registration
 │       ├── deflate/

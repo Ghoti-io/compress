@@ -38,7 +38,7 @@
 namespace {
 
 const char * const kMethods[] = {
-    "deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli"};
+    "deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli", "lzma2"};
 
 /// Compressible, but not so compressible that it says nothing.
 std::vector<uint8_t> text_like(size_t len) {
@@ -259,7 +259,7 @@ TEST(AllocApi, RespectsMaxOutputBytes) {
 TEST(AllocApi, EveryMethodReportsTheCeilingAsALimit) {
   const std::vector<uint8_t> input = very_compressible(256 * 1024);
   const char * methods[] = {
-      "gzip", "zlib", "deflate", "lz4", "lzw", "rle", "zstd", "brotli"};
+      "gzip", "zlib", "deflate", "lz4", "lzw", "rle", "zstd", "brotli", "lzma2"};
   size_t swept = 0;
 
   for (const char * method : methods) {
@@ -299,7 +299,7 @@ TEST(AllocApi, EveryMethodReportsTheCeilingAsALimit) {
     gcomp_buffer_free(nullptr, enc);
     ++swept;
   }
-  EXPECT_EQ(swept, 8u) << "a method was added to the registry and not to this "
+  EXPECT_EQ(swept, 9u) << "a method was added to the registry and not to this "
                           "list, which is how gzip's answer went unnoticed";
 }
 

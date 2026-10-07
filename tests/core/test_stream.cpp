@@ -962,7 +962,8 @@ TEST(StreamBufferArguments, EveryMethodRefusesAnInconsistentBuffer) {
   // A real stream per method, so the decoder cases are refused for their
   // arguments rather than for the bytes.
   static const char * const kMethods[] = {
-      "deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli"};
+      "deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli", "lzma",
+      "lzma2"};
 
   struct Case {
     const char * what;
@@ -1104,7 +1105,8 @@ TEST(StreamBufferArguments, EveryMethodRefusesAnInconsistentBuffer) {
 TEST(StreamBufferArguments, AFullyConsumedInputBufferIsAccepted) {
   std::vector<uint8_t> data(64, 'c');
   for (const char * method :
-      {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli"}) {
+      {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli", "lzma",
+          "lzma2"}) {
     gcomp_encoder_t * enc = nullptr;
     ASSERT_EQ(
         gcomp_encoder_create(gcomp_registry_default(), method, nullptr, &enc),

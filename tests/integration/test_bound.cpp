@@ -286,6 +286,14 @@ std::vector<Config> configurations() {
         }});
   }
 
+  c.push_back({"lzma2/default", "lzma2", nullptr});
+  for (int64_t preset : {0, 6}) {
+    c.push_back({"lzma2/preset" + std::to_string(preset), "lzma2",
+        [preset](gcomp_options_t * o) {
+          gcomp_options_set_int64(o, "lzma2.preset", preset);
+        }});
+  }
+
   c.push_back({"brotli/default", "brotli", nullptr});
   for (int64_t lgwin : {10, 24}) {
     c.push_back({"brotli/lgwin" + std::to_string(lgwin), "brotli",
@@ -401,6 +409,10 @@ TEST(EncodeBound, Rle) {
 }
 TEST(EncodeBound, Brotli) {
   sweep_method("brotli");
+}
+
+TEST(EncodeBound, Lzma2) {
+  sweep_method("lzma2");
 }
 
 /**
@@ -557,7 +569,8 @@ TEST(EncodeBound, IsNotWildlyLoose) {
       all_one(n)};
 
   for (const char * method :
-      {"deflate", "zlib", "gzip", "zstd", "lz4", "rle", "lzw", "brotli"}) {
+      {"deflate", "zlib", "gzip", "zstd", "lz4", "rle", "lzw", "brotli",
+          "lzma2"}) {
     size_t bound = 0;
     ASSERT_EQ(gcomp_encode_bound(nullptr, method, nullptr, n, &bound),
         GCOMP_OK);
@@ -710,7 +723,8 @@ TEST(EncodeBound, RejectsBadArguments) {
 TEST(EncodeBound, AnUnrepresentableBoundIsRefused) {
   const size_t kMax = (size_t)-1;
   for (const char * method :
-      {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli"}) {
+      {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli",
+          "lzma2"}) {
     // Each of these is larger than SIZE_MAX minus the framing every format
     // here charges for an input that long, so none of their bounds fits in a
     // size_t. Three quarters of SIZE_MAX does fit for several of them, which
@@ -733,7 +747,8 @@ TEST(EncodeBound, AnUnrepresentableBoundIsRefused) {
 /// Zero in, something out: every framed format still writes its frame.
 TEST(EncodeBound, EmptyInput) {
   for (const char * method :
-      {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli"}) {
+      {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli",
+          "lzma2"}) {
     size_t bound = 0;
     ASSERT_EQ(gcomp_encode_bound(nullptr, method, nullptr, 0, &bound),
         GCOMP_OK)

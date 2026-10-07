@@ -127,6 +127,21 @@ static const gcomp_option_schema_t g_lzma_option_schemas[] = {
         NULL,
     },
     {
+        "lzma.preset",
+        GCOMP_OPT_INT64,
+        1,
+        {.i64 = 6},
+        1,
+        1,
+        0,
+        9,
+        0,
+        0,
+        "Encoder effort and dictionary, 0..9, as xz's presets. The dictionary is "
+        "256 KiB at 0 and 64 MiB at 9; the encoder holds about six times it.",
+        NULL,
+    },
+    {
         "lzma.lc",
         GCOMP_OPT_INT64,
         1,
@@ -137,7 +152,8 @@ static const gcomp_option_schema_t g_lzma_option_schemas[] = {
         8,
         0,
         0,
-        "Literal context bits, 0..8. Raw streams only; a header carries it.",
+        "Literal context bits, 0..8. A decoder reads it from the header unless "
+        "the stream is raw.",
         NULL,
     },
     {
@@ -151,7 +167,8 @@ static const gcomp_option_schema_t g_lzma_option_schemas[] = {
         4,
         0,
         0,
-        "Literal position bits, 0..4. Raw streams only; a header carries it.",
+        "Literal position bits, 0..4. A decoder reads it from the header unless "
+        "the stream is raw.",
         NULL,
     },
     {
@@ -165,7 +182,8 @@ static const gcomp_option_schema_t g_lzma_option_schemas[] = {
         4,
         0,
         0,
-        "Position bits, 0..4. Raw streams only; a header carries it.",
+        "Position bits, 0..4. A decoder reads it from the header unless the "
+        "stream is raw.",
         NULL,
     },
     {
@@ -179,7 +197,8 @@ static const gcomp_option_schema_t g_lzma_option_schemas[] = {
         0,
         LZMA_DICT_MIN,
         0xFFFFFFFFull,
-        "Dictionary size in bytes, 4096..4294967295. Raw streams only.",
+        "Dictionary in bytes, 4096..4294967295. A raw decoder needs it; an "
+        "encoder uses the preset's unless this is set.",
         NULL,
     },
     {
@@ -193,8 +212,9 @@ static const gcomp_option_schema_t g_lzma_option_schemas[] = {
         0,
         0,
         0,
-        "Raw decoder: bytes the stream holds, which then needs no end marker. "
-        "The default, the largest value, means the stream ends with a marker.",
+        "The bytes the stream holds, which then needs no end marker: a decoder "
+        "stops there, and an encoder writes it in the header and refuses any "
+        "other length. The default, the largest value, means unstated.",
         NULL,
     },
     LZMA_LIMIT_OPTIONS(GCOMP_LZMA_MAX_EXPANSION_RATIO, LZMA_DEFAULT_WINDOW),
@@ -205,6 +225,7 @@ static const gcomp_option_schema_t g_lzma_option_schemas[] = {
  * checks it. */
 static const char * const g_lzma_option_keys[] = {
     "lzma.raw",
+    "lzma.preset",
     "lzma.lc",
     "lzma.lp",
     "lzma.pb",
@@ -221,10 +242,86 @@ static const gcomp_method_schema_t g_lzma_schema = {
 };
 
 static const gcomp_option_schema_t g_lzma2_option_schemas[] = {
+    {
+        "lzma2.preset",
+        GCOMP_OPT_INT64,
+        1,
+        {.i64 = 6},
+        1,
+        1,
+        0,
+        9,
+        0,
+        0,
+        "Encoder effort and dictionary, 0..9, as xz's presets.",
+        NULL,
+    },
+    {
+        "lzma2.lc",
+        GCOMP_OPT_INT64,
+        1,
+        {.i64 = 3},
+        1,
+        1,
+        0,
+        4,
+        0,
+        0,
+        "Literal context bits, 0..4. With lp, at most 4.",
+        NULL,
+    },
+    {
+        "lzma2.lp",
+        GCOMP_OPT_INT64,
+        1,
+        {.i64 = 0},
+        1,
+        1,
+        0,
+        4,
+        0,
+        0,
+        "Literal position bits, 0..4. With lc, at most 4.",
+        NULL,
+    },
+    {
+        "lzma2.pb",
+        GCOMP_OPT_INT64,
+        1,
+        {.i64 = 2},
+        1,
+        1,
+        0,
+        4,
+        0,
+        0,
+        "Position bits, 0..4.",
+        NULL,
+    },
+    {
+        "lzma2.dict_size",
+        GCOMP_OPT_UINT64,
+        1,
+        {.ui64 = 1u << 23},
+        1,
+        1,
+        0,
+        0,
+        LZMA_DICT_MIN,
+        0xFFFFFFFFull,
+        "Encoder dictionary in bytes, 4096..4294967295; the preset's unless set. "
+        "The decoder's window is limits.max_window_bytes.",
+        NULL,
+    },
     LZMA_LIMIT_OPTIONS(GCOMP_LZMA_MAX_EXPANSION_RATIO, LZMA_DEFAULT_WINDOW),
 };
 
 static const char * const g_lzma2_option_keys[] = {
+    "lzma2.preset",
+    "lzma2.lc",
+    "lzma2.lp",
+    "lzma2.pb",
+    "lzma2.dict_size",
     LZMA_LIMIT_KEYS,
 };
 
@@ -256,6 +353,78 @@ static gcomp_status_t lzma_wire_decoder(gcomp_registry_t * registry,
   (*decoder_out)->update_fn = lzma_decoder_update;
   (*decoder_out)->finish_fn = lzma_decoder_finish;
   (*decoder_out)->reset_fn = lzma_decoder_reset;
+  return GCOMP_OK;
+}
+
+static gcomp_status_t lzma_wire_encoder(gcomp_registry_t * registry,
+    gcomp_options_t * options, gcomp_encoder_t ** encoder_out, int lzma2) {
+  gcomp_status_t status;
+  if (!encoder_out || !*encoder_out) {
+    return GCOMP_ERR_INVALID_ARG;
+  }
+  status = lzma_encoder_init(registry, options, *encoder_out, lzma2);
+  if (status != GCOMP_OK) {
+    return status;
+  }
+  (*encoder_out)->update_fn = lzma_encoder_update;
+  (*encoder_out)->finish_fn = lzma_encoder_finish;
+  /* An LZMA stream is one range coder from its first byte to its last, so
+   * there is nowhere in it a flush could stop; LZMA2's chunks are that. */
+  if (lzma2) {
+    (*encoder_out)->flush_fn = lzma_encoder_flush;
+  }
+  (*encoder_out)->reset_fn = lzma_encoder_reset;
+  return GCOMP_OK;
+}
+
+static gcomp_status_t lzma_create_encoder(gcomp_registry_t * registry,
+    gcomp_options_t * options, gcomp_encoder_t ** encoder_out) {
+  return lzma_wire_encoder(registry, options, encoder_out, 0);
+}
+
+static gcomp_status_t lzma2_create_encoder(gcomp_registry_t * registry,
+    gcomp_options_t * options, gcomp_encoder_t ** encoder_out) {
+  return lzma_wire_encoder(registry, options, encoder_out, 1);
+}
+
+static void lzma_destroy_encoder_wrapper(gcomp_encoder_t * encoder) {
+  lzma_encoder_destroy(encoder);
+}
+
+/**
+ * @brief Bytes for the worst case of an LZMA2 stream.
+ *
+ * A chunk that coding does not shrink is stored, which costs 3 bytes of header
+ * for at most 65536 bytes; an LZMA chunk is chosen only when it is smaller than
+ * what it holds and costs 6 bytes of header. Chunks are cut at 65536 coded
+ * bytes or when the window runs out, so one is at least 16384 bytes of input
+ * apart from the last of each batch, and a batch is at least 128 KiB. The end
+ * byte is one more.
+ *
+ * `lzma` has no bound: it cannot store, and the worst case for a stream that
+ * only codes is about ten bytes out for each byte in, which is a number no
+ * caller means to allocate.
+ */
+static gcomp_status_t lzma2_encode_bound(gcomp_options_t * options,
+    size_t input_size, size_t * bound_out) {
+  size_t blocks;
+  size_t bound = 64;
+  gcomp_status_t s;
+  (void)options;
+  if (!bound_out) {
+    return GCOMP_ERR_INVALID_ARG;
+  }
+  s = gcomp_bound_block_count(input_size, 16384u, &blocks);
+  if (s == GCOMP_OK) {
+    s = gcomp_bound_add(&bound, input_size);
+  }
+  if (s == GCOMP_OK) {
+    s = gcomp_bound_add_mul(&bound, blocks, 6u);
+  }
+  if (s != GCOMP_OK) {
+    return s;
+  }
+  *bound_out = bound;
   return GCOMP_OK;
 }
 
@@ -330,8 +499,10 @@ static const gcomp_method_t g_lzma_method = {
     .abi_version = GCOMP_METHOD_ABI_VERSION,
     .size = sizeof(gcomp_method_t),
     .name = "lzma",
-    .capabilities = GCOMP_CAP_DECODE,
+    .capabilities = GCOMP_CAP_ENCODE | GCOMP_CAP_DECODE,
+    .create_encoder = lzma_create_encoder,
     .create_decoder = lzma_create_decoder,
+    .destroy_encoder = lzma_destroy_encoder_wrapper,
     .destroy_decoder = lzma_destroy_decoder_wrapper,
     .get_schema = lzma_get_schema,
     .peek = lzma_peek,
@@ -341,10 +512,13 @@ static const gcomp_method_t g_lzma2_method = {
     .abi_version = GCOMP_METHOD_ABI_VERSION,
     .size = sizeof(gcomp_method_t),
     .name = "lzma2",
-    .capabilities = GCOMP_CAP_DECODE,
+    .capabilities = GCOMP_CAP_ENCODE | GCOMP_CAP_DECODE,
+    .create_encoder = lzma2_create_encoder,
     .create_decoder = lzma2_create_decoder,
+    .destroy_encoder = lzma_destroy_encoder_wrapper,
     .destroy_decoder = lzma_destroy_decoder_wrapper,
     .get_schema = lzma2_get_schema,
+    .encode_bound = lzma2_encode_bound,
 };
 
 gcomp_status_t gcomp_method_lzma_register(gcomp_registry_t * registry) {

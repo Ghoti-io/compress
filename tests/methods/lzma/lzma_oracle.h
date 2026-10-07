@@ -145,6 +145,26 @@ inline std::vector<uint8_t> alone_encode(
   return out;
 }
 
+/// What liblzma makes of an `.lzma` file; false if it refuses it. `want`, when
+/// given, is the size to expect, so a truncated answer cannot pass.
+inline bool alone_decode(
+    const std::vector<uint8_t> & in, std::vector<uint8_t> & out, size_t cap) {
+  Stream s;
+  std::memset(&s, 0, sizeof(s));
+  out.assign(cap + 1, 0);
+  if (lib().alone_decoder(&s, UINT64_MAX) != 0) {
+    return false;
+  }
+  s.next_in = in.data();
+  s.avail_in = in.size();
+  s.next_out = out.data();
+  s.avail_out = out.size();
+  int r = lib().code(&s, 3 /* LZMA_FINISH */);
+  lib().end(&s);
+  out.resize(out.size() - s.avail_out);
+  return r == 1 /* LZMA_STREAM_END */ && s.avail_in == 0;
+}
+
 /// Raw LZMA1 or LZMA2, as 7z and zip method 14 hold them.
 inline std::vector<uint8_t> raw_encode(
     uint64_t id, const std::vector<uint8_t> & in, Options o) {

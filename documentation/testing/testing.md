@@ -368,7 +368,8 @@ tests/
 │   │   └── test_brotli_robustness.cpp # Hand-built streams, corruption sweep
 │   ├── lzma/                     # LZMA and LZMA2 method tests
 │   │   ├── lzma_oracle.h         # liblzma loaded at run time, as the reference
-│   │   └── test_lzma_decoder.cpp # Against liblzma, byte-at-a-time, malformed chunks
+│   │   ├── test_lzma_decoder.cpp # Against liblzma, byte-at-a-time, malformed chunks
+│   │   └── test_lzma_encoder.cpp # Both decoders read it; windows, stored chunks, flush, bound
 │   ├── deflate/                  # Deflate method tests
 │   │   ├── test_deflate_bitio.cpp
 │   │   ├── test_deflate_decoder.cpp

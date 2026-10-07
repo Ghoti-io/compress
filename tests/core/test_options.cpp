@@ -530,6 +530,24 @@ void setBrotliLevelBelowMin(gcomp_options_t * o) {
 void setBrotliLevelAboveMax(gcomp_options_t * o) {
   gcomp_options_set_int64(o, "brotli.level", 2);
 }
+// lzma and lzma2 at each boundary of each range, for the same reason as
+// brotli's: the encoder does not repeat them, so only the schema holds them.
+template <const char * (*Key)(), int64_t V>
+void setLzmaInt(gcomp_options_t * o) {
+  gcomp_options_set_int64(o, Key(), V);
+}
+template <const char * (*Key)(), uint64_t V>
+void setLzmaUint(gcomp_options_t * o) {
+  gcomp_options_set_uint64(o, Key(), V);
+}
+const char * kLzmaPreset() { return "lzma.preset"; }
+const char * kLzmaLc() { return "lzma.lc"; }
+const char * kLzmaLp() { return "lzma.lp"; }
+const char * kLzmaPb() { return "lzma.pb"; }
+const char * kLzmaDict() { return "lzma.dict_size"; }
+const char * kLzma2Preset() { return "lzma2.preset"; }
+const char * kLzma2Lc() { return "lzma2.lc"; }
+const char * kLzma2Dict() { return "lzma2.dict_size"; }
 void setZeroOutputAndRatio(gcomp_options_t * o) {
   gcomp_options_set_uint64(o, "limits.max_output_bytes", 0);
   gcomp_options_set_uint64(o, "limits.max_expansion_ratio", 0);
@@ -581,6 +599,40 @@ TEST(OptionValidationTest, MistakesAreRejectedAtCreateTime) {
           GCOMP_ERR_INVALID_ARG},
       {"brotli.level above the maximum", "brotli", setBrotliLevelAboveMax,
           GCOMP_ERR_INVALID_ARG},
+      {"lzma.preset below the minimum", "lzma", setLzmaInt<kLzmaPreset, -1>,
+          GCOMP_ERR_INVALID_ARG},
+      {"lzma.preset at the minimum", "lzma", setLzmaInt<kLzmaPreset, 0>,
+          GCOMP_OK},
+      {"lzma.preset at the maximum", "lzma", setLzmaInt<kLzmaPreset, 9>,
+          GCOMP_OK},
+      {"lzma.preset above the maximum", "lzma", setLzmaInt<kLzmaPreset, 10>,
+          GCOMP_ERR_INVALID_ARG},
+      {"lzma.lc at the maximum", "lzma", setLzmaInt<kLzmaLc, 8>, GCOMP_OK},
+      {"lzma.lc above the maximum", "lzma", setLzmaInt<kLzmaLc, 9>,
+          GCOMP_ERR_INVALID_ARG},
+      {"lzma.lp at the maximum", "lzma", setLzmaInt<kLzmaLp, 4>, GCOMP_OK},
+      {"lzma.lp above the maximum", "lzma", setLzmaInt<kLzmaLp, 5>,
+          GCOMP_ERR_INVALID_ARG},
+      {"lzma.pb at the maximum", "lzma", setLzmaInt<kLzmaPb, 4>, GCOMP_OK},
+      {"lzma.pb above the maximum", "lzma", setLzmaInt<kLzmaPb, 5>,
+          GCOMP_ERR_INVALID_ARG},
+      {"lzma.dict_size below the minimum", "lzma",
+          setLzmaUint<kLzmaDict, 4095>, GCOMP_ERR_INVALID_ARG},
+      {"lzma.dict_size at the minimum", "lzma", setLzmaUint<kLzmaDict, 4096>,
+          GCOMP_OK},
+      // The schema's top, 4 GiB - 1, is a value the encoder then cannot
+      // allocate for (it holds about six times the dictionary), so the
+      // largest one that creates is a size that can be.
+      {"lzma.dict_size at a large size", "lzma", setLzmaUint<kLzmaDict, 1u << 26>,
+          GCOMP_OK},
+      {"lzma.dict_size above the maximum", "lzma",
+          setLzmaUint<kLzmaDict, 0x100000000ull>, GCOMP_ERR_INVALID_ARG},
+      {"lzma2.preset above the maximum", "lzma2", setLzmaInt<kLzma2Preset, 10>,
+          GCOMP_ERR_INVALID_ARG},
+      {"lzma2.lc above its maximum of 4", "lzma2", setLzmaInt<kLzma2Lc, 5>,
+          GCOMP_ERR_INVALID_ARG},
+      {"lzma2.dict_size below the minimum", "lzma2",
+          setLzmaUint<kLzma2Dict, 4095>, GCOMP_ERR_INVALID_ARG},
   };
 
   for (const Case & c : kCases) {
@@ -596,7 +648,8 @@ TEST(OptionValidationTest, ZeroIsAcceptedForTheLimitsThatMeanUnlimited) {
   // for both -- so a schema declaring a minimum of 1 rejects a documented
   // value before the method ever sees it.  lz4 and zstd both declared one.
   for (const char * method :
-      {"lz4", "zstd", "lzw", "rle", "deflate", "gzip", "brotli"}) {
+      {"lz4", "zstd", "lzw", "rle", "deflate", "gzip", "brotli", "lzma",
+          "lzma2"}) {
     EXPECT_EQ(createEncoderWith(method, setZeroOutputAndRatio), GCOMP_OK)
         << method << ": zero output/ratio limits must be accepted";
     EXPECT_EQ(createDecoderWith(method, setZeroOutputAndRatio), GCOMP_OK)

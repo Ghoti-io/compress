@@ -39,6 +39,7 @@
 
 #include <ghoti.io/compress/allocator.h>
 #include <ghoti.io/compress/errors.h>
+#include <ghoti.io/compress/lzma.h>
 #include <ghoti.io/compress/options.h>
 #include <ghoti.io/compress/registry.h>
 #include <ghoti.io/compress/stream.h>
@@ -82,15 +83,6 @@ extern "C" {
 
 /** A stream's smallest legal dictionary; the SDK and liblzma both clamp to it. */
 #define LZMA_DICT_MIN 4096u
-
-/**
- * The most a stream can expand: the output over the input of the cheapest
- * symbol, a rep0 match of 273 bytes. It costs fourteen decisions, and a
- * probability stops at 31/2048 or 2017/2048, so each costs at least 0.0220
- * bits; the coder's truncation adds about one percent. 273 bytes for 0.31
- * bits is 7020:1, so 8192 is a ceiling the format cannot reach.
- */
-#define GCOMP_LZMA_MAX_EXPANSION_RATIO 8192ULL
 
 typedef struct lzma_len_probs_s {
   uint16_t choice;

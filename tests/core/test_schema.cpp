@@ -400,7 +400,7 @@ TEST(SchemaAllMethodsTest, EveryKeyArrayMatchesItsSchema) {
 
   size_t checked = 0;
   for (const char * name : {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw",
-           "rle", "brotli"}) {
+           "rle", "brotli", "lzma", "lzma2"}) {
     const gcomp_method_t * method = gcomp_registry_find(reg, name);
     ASSERT_NE(method, nullptr) << name;
 
