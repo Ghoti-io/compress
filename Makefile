@@ -872,6 +872,7 @@ FUZZ_DEPFILES := $(patsubst fuzz/%.c,$(APP_DIR)/fuzz/%.d,$(FUZZ_SOURCES))
 .PHONY: fuzz-zlib-decoder fuzz-zlib-encoder fuzz-zlib-roundtrip
 .PHONY: fuzz-brotli-decoder fuzz-brotli-encoder fuzz-brotli-roundtrip
 .PHONY: fuzz-lzma-decoder fuzz-lzma-encoder fuzz-lzma-roundtrip
+.PHONY: fuzz-bzip2-decoder fuzz-bzip2-encoder fuzz-bzip2-roundtrip
 .PHONY: fuzz-lzma2-decoder fuzz-lzma2-encoder fuzz-lzma2-roundtrip
 # Sanitizer commands
 .PHONY: test-asan test-asan-quiet test-ubsan sanitizer-help
@@ -1021,6 +1022,7 @@ fuzz-help: ## Show fuzzing help and instructions
 	@printf "    make fuzz-brotli-encoder  - Run Brotli encoder fuzzer\n"
 	@printf "    make fuzz-brotli-roundtrip- Run Brotli roundtrip fuzzer\n"
 	@printf "    make fuzz-lzma-decoder    - Run LZMA decoder fuzzer (also -encoder, -roundtrip, and fuzz-lzma2-*)\n"
+	@printf "    make fuzz-bzip2-decoder   - Run bzip2 decoder fuzzer (also -encoder, -roundtrip)\n"
 	@printf "\n"
 	@printf "Workflow:\n"
 	@printf "  1. make fuzz-corpus        # Generate seed inputs\n"
@@ -1514,6 +1516,51 @@ fuzz-lzma-roundtrip: $(APP_DIR)/fuzz/fuzz_lzma_roundtrip$(EXE_EXTENSION)
 		printf 'Hello' > fuzz/corpus/lzma_roundtrip/hello.bin; \
 	fi
 	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/lzma_roundtrip -o fuzz/findings/lzma_roundtrip -- $(APP_DIR)/fuzz/fuzz_lzma_roundtrip$(EXE_EXTENSION)
+
+fuzz-bzip2-decoder: ## Run bzip2 decoder fuzzer (Ctrl+C to stop)
+fuzz-bzip2-decoder: $(APP_DIR)/fuzz/fuzz_bzip2_decoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running bzip2 Decoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/bzip2_decoder
+	@if [ ! -d fuzz/corpus/bzip2_decoder ] || [ -z "$$(ls -A fuzz/corpus/bzip2_decoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/bzip2_decoder; \
+		printf '\x06' > fuzz/corpus/bzip2_decoder/empty.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/bzip2_decoder -o fuzz/findings/bzip2_decoder -- $(APP_DIR)/fuzz/fuzz_bzip2_decoder$(EXE_EXTENSION)
+
+fuzz-bzip2-encoder: ## Run bzip2 encoder fuzzer (Ctrl+C to stop)
+fuzz-bzip2-encoder: $(APP_DIR)/fuzz/fuzz_bzip2_encoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running bzip2 Encoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/bzip2_encoder
+	@if [ ! -d fuzz/corpus/bzip2_encoder ] || [ -z "$$(ls -A fuzz/corpus/bzip2_encoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/bzip2_encoder; \
+		printf 'Hello' > fuzz/corpus/bzip2_encoder/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/bzip2_encoder -o fuzz/findings/bzip2_encoder -- $(APP_DIR)/fuzz/fuzz_bzip2_encoder$(EXE_EXTENSION)
+
+fuzz-bzip2-roundtrip: ## Run bzip2 roundtrip fuzzer (Ctrl+C to stop)
+fuzz-bzip2-roundtrip: $(APP_DIR)/fuzz/fuzz_bzip2_roundtrip$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running bzip2 Roundtrip Fuzzer   ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/bzip2_roundtrip
+	@if [ ! -d fuzz/corpus/bzip2_roundtrip ] || [ -z "$$(ls -A fuzz/corpus/bzip2_roundtrip 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/bzip2_roundtrip; \
+		printf 'Hello' > fuzz/corpus/bzip2_roundtrip/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/bzip2_roundtrip -o fuzz/findings/bzip2_roundtrip -- $(APP_DIR)/fuzz/fuzz_bzip2_roundtrip$(EXE_EXTENSION)
 
 fuzz-lzma2-decoder: ## Run LZMA2 decoder fuzzer (Ctrl+C to stop)
 fuzz-lzma2-decoder: $(APP_DIR)/fuzz/fuzz_lzma2_decoder$(EXE_EXTENSION)

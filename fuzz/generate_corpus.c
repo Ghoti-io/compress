@@ -598,6 +598,7 @@ int main(void) {
         {"brotli", "brotli_"},
         {"lzma", "lzma_"},
         {"lzma2", "lzma2_"},
+        {"bzip2", "bzip2_"},
     };
 
     gcomp_registry_t * registry = gcomp_registry_default();
