@@ -1130,6 +1130,11 @@ static gcomp_status_t dec_drive(lzma_decoder_t * st, const uint8_t ** in,
   return GCOMP_OK;
 }
 
+/* A pointer to nothing that is still a pointer: arithmetic on a null one, even
+ * by zero, is undefined, and update() and finish() are both called with no
+ * input. */
+static const uint8_t g_no_input[1] = {0};
+
 gcomp_status_t lzma_decoder_update(gcomp_decoder_t * decoder,
     gcomp_buffer_t * input, gcomp_buffer_t * output) {
   lzma_decoder_t * st;
@@ -1147,10 +1152,15 @@ gcomp_status_t lzma_decoder_update(gcomp_decoder_t * decoder,
   if (st->phase == PH_DONE) {
     return GCOMP_OK;
   }
-  in = input->data ? (const uint8_t *)input->data + input->used : NULL;
-  in_end = in ? in + (input->size - input->used) : NULL;
+  if (input->data) {
+    in = (const uint8_t *)input->data + input->used;
+    in_end = in + (input->size - input->used);
+  }
+  else {
+    in = in_end = g_no_input;
+  }
   s = dec_drive(st, &in, in_end, output, &why);
-  if (in) {
+  if (input->data) {
     input->used = (size_t)(in - (const uint8_t *)input->data);
   }
   return s;
@@ -1159,7 +1169,7 @@ gcomp_status_t lzma_decoder_update(gcomp_decoder_t * decoder,
 gcomp_status_t lzma_decoder_finish(
     gcomp_decoder_t * decoder, gcomp_buffer_t * output) {
   lzma_decoder_t * st;
-  const uint8_t * none = NULL;
+  const uint8_t * none = g_no_input;
   gcomp_status_t s;
   int why = 0;
   if (!decoder->method_state) {

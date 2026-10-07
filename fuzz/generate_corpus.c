@@ -596,6 +596,8 @@ int main(void) {
         {"rle", "rle_"},
         {"zstd", "zstd_"},
         {"brotli", "brotli_"},
+        {"lzma", "lzma_"},
+        {"lzma2", "lzma2_"},
     };
 
     gcomp_registry_t * registry = gcomp_registry_default();

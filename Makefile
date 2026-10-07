@@ -871,6 +871,8 @@ FUZZ_DEPFILES := $(patsubst fuzz/%.c,$(APP_DIR)/fuzz/%.d,$(FUZZ_SOURCES))
 .PHONY: fuzz-zstd-decoder fuzz-zstd-encoder fuzz-zstd-roundtrip
 .PHONY: fuzz-zlib-decoder fuzz-zlib-encoder fuzz-zlib-roundtrip
 .PHONY: fuzz-brotli-decoder fuzz-brotli-encoder fuzz-brotli-roundtrip
+.PHONY: fuzz-lzma-decoder fuzz-lzma-encoder fuzz-lzma-roundtrip
+.PHONY: fuzz-lzma2-decoder fuzz-lzma2-encoder fuzz-lzma2-roundtrip
 # Sanitizer commands
 .PHONY: test-asan test-asan-quiet test-ubsan sanitizer-help
 .PHONY: test-tsan test-tsan-quiet test-tsan-threads
@@ -1018,6 +1020,7 @@ fuzz-help: ## Show fuzzing help and instructions
 	@printf "    make fuzz-brotli-decoder  - Run Brotli decoder fuzzer\n"
 	@printf "    make fuzz-brotli-encoder  - Run Brotli encoder fuzzer\n"
 	@printf "    make fuzz-brotli-roundtrip- Run Brotli roundtrip fuzzer\n"
+	@printf "    make fuzz-lzma-decoder    - Run LZMA decoder fuzzer (also -encoder, -roundtrip, and fuzz-lzma2-*)\n"
 	@printf "\n"
 	@printf "Workflow:\n"
 	@printf "  1. make fuzz-corpus        # Generate seed inputs\n"
@@ -1466,6 +1469,96 @@ fuzz-brotli-roundtrip: $(APP_DIR)/fuzz/fuzz_brotli_roundtrip$(EXE_EXTENSION)
 		printf 'Hello' > fuzz/corpus/brotli_roundtrip/hello.bin; \
 	fi
 	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/brotli_roundtrip -o fuzz/findings/brotli_roundtrip -- $(APP_DIR)/fuzz/fuzz_brotli_roundtrip$(EXE_EXTENSION)
+
+fuzz-lzma-decoder: ## Run LZMA decoder fuzzer (Ctrl+C to stop)
+fuzz-lzma-decoder: $(APP_DIR)/fuzz/fuzz_lzma_decoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running LZMA Decoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/lzma_decoder
+	@if [ ! -d fuzz/corpus/lzma_decoder ] || [ -z "$$(ls -A fuzz/corpus/lzma_decoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/lzma_decoder; \
+		printf '\x06' > fuzz/corpus/lzma_decoder/empty.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/lzma_decoder -o fuzz/findings/lzma_decoder -- $(APP_DIR)/fuzz/fuzz_lzma_decoder$(EXE_EXTENSION)
+
+fuzz-lzma-encoder: ## Run LZMA encoder fuzzer (Ctrl+C to stop)
+fuzz-lzma-encoder: $(APP_DIR)/fuzz/fuzz_lzma_encoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running LZMA Encoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/lzma_encoder
+	@if [ ! -d fuzz/corpus/lzma_encoder ] || [ -z "$$(ls -A fuzz/corpus/lzma_encoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/lzma_encoder; \
+		printf 'Hello' > fuzz/corpus/lzma_encoder/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/lzma_encoder -o fuzz/findings/lzma_encoder -- $(APP_DIR)/fuzz/fuzz_lzma_encoder$(EXE_EXTENSION)
+
+fuzz-lzma-roundtrip: ## Run LZMA roundtrip fuzzer (Ctrl+C to stop)
+fuzz-lzma-roundtrip: $(APP_DIR)/fuzz/fuzz_lzma_roundtrip$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running LZMA Roundtrip Fuzzer   ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/lzma_roundtrip
+	@if [ ! -d fuzz/corpus/lzma_roundtrip ] || [ -z "$$(ls -A fuzz/corpus/lzma_roundtrip 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/lzma_roundtrip; \
+		printf 'Hello' > fuzz/corpus/lzma_roundtrip/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/lzma_roundtrip -o fuzz/findings/lzma_roundtrip -- $(APP_DIR)/fuzz/fuzz_lzma_roundtrip$(EXE_EXTENSION)
+
+fuzz-lzma2-decoder: ## Run LZMA2 decoder fuzzer (Ctrl+C to stop)
+fuzz-lzma2-decoder: $(APP_DIR)/fuzz/fuzz_lzma2_decoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running LZMA2 Decoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/lzma2_decoder
+	@if [ ! -d fuzz/corpus/lzma2_decoder ] || [ -z "$$(ls -A fuzz/corpus/lzma2_decoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/lzma2_decoder; \
+		printf '\x06' > fuzz/corpus/lzma2_decoder/empty.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/lzma2_decoder -o fuzz/findings/lzma2_decoder -- $(APP_DIR)/fuzz/fuzz_lzma2_decoder$(EXE_EXTENSION)
+
+fuzz-lzma2-encoder: ## Run LZMA2 encoder fuzzer (Ctrl+C to stop)
+fuzz-lzma2-encoder: $(APP_DIR)/fuzz/fuzz_lzma2_encoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running LZMA2 Encoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/lzma2_encoder
+	@if [ ! -d fuzz/corpus/lzma2_encoder ] || [ -z "$$(ls -A fuzz/corpus/lzma2_encoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/lzma2_encoder; \
+		printf 'Hello' > fuzz/corpus/lzma2_encoder/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/lzma2_encoder -o fuzz/findings/lzma2_encoder -- $(APP_DIR)/fuzz/fuzz_lzma2_encoder$(EXE_EXTENSION)
+
+fuzz-lzma2-roundtrip: ## Run LZMA2 roundtrip fuzzer (Ctrl+C to stop)
+fuzz-lzma2-roundtrip: $(APP_DIR)/fuzz/fuzz_lzma2_roundtrip$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running LZMA2 Roundtrip Fuzzer   ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/lzma2_roundtrip
+	@if [ ! -d fuzz/corpus/lzma2_roundtrip ] || [ -z "$$(ls -A fuzz/corpus/lzma2_roundtrip 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/lzma2_roundtrip; \
+		printf 'Hello' > fuzz/corpus/lzma2_roundtrip/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/lzma2_roundtrip -o fuzz/findings/lzma2_roundtrip -- $(APP_DIR)/fuzz/fuzz_lzma2_roundtrip$(EXE_EXTENSION)
 
 # The zlib harnesses existed for a while with no way to be run: fuzz-replay fed
 # them, because it feeds every harness it finds, but there was no campaign
