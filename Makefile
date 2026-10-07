@@ -2573,7 +2573,7 @@ ORACLE := tools/oracle
 ORACLE_TEST_NAMES := testZstd_oracle testZstd_walk testZstd_dict_format \
 	testGzip_oracle testZlib_oracle testZlib_dictionary testLz4_spec_oracle \
 	testLz4_walk testDeflate_oracle testLzw_spec_oracle testRle_spec_oracle \
-	testBrotli testBrotli_encoder testBrotli_robustness testLzma_decoder testLzma_encoder testBzip2_decoder \
+	testBrotli testBrotli_encoder testBrotli_robustness testLzma_decoder testLzma_encoder testBzip2_decoder testBzip2_encoder \
 	testOracle testSeekable testGolden_provenance
 ORACLE_TESTS := $(addprefix $(APP_DIR)/,$(addsuffix $(EXE_EXTENSION),$(ORACLE_TEST_NAMES)))
 

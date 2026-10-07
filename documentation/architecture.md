@@ -574,6 +574,8 @@ compress/
 │       │   └── brotli_register.c # Vtable and registration
 │       ├── bzip2/
 │       │   ├── bzip2_decode.c    # State machine for the bits, then the sorted list
+│       │   ├── bzip2_encode.c    # Run-length pass, MTF, table search, flush as stream end
+│       │   ├── bzip2_bwt.c       # SA-IS suffix sort of the block written twice
 │       │   ├── bzip2_crc.c       # The MSB-first CRC-32 table
 │       │   └── bzip2_register.c  # Vtable and registration
 │       ├── lzma/

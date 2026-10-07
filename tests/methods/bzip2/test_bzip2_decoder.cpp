@@ -669,6 +669,22 @@ TEST_F(Bzip2DecoderTest, TheExpansionLimitStopsAZeroBombAndTheDefaultAllowsIt) {
   EXPECT_EQ(out.size(), zeros.size());
 }
 
+/**
+ * The caller's own ratio limit holds when the whole block fits the output
+ * buffer, which is the case where the block is written and finished in one
+ * step and the state has moved on by the time anything looks. The case above
+ * uses a buffer far smaller than the block, so it never reached this.
+ */
+TEST_F(Bzip2DecoderTest, ATightRatioLimitHoldsWhenTheBlockFitsTheOutputBuffer) {
+  const Bytes zeros(8u << 20, 0);
+  Bytes z = bzref::compress(zeros, 9), out;
+  ASSERT_FALSE(z.empty());
+  gcomp_options_t * o = Opts();
+  ASSERT_EQ(gcomp_options_set_uint64(o, "limits.max_expansion_ratio", 2), GCOMP_OK);
+  EXPECT_EQ(Decode(z, out, z.size(), zeros.size() + 64, o), GCOMP_ERR_LIMIT);
+  gcomp_options_destroy(o);
+}
+
 TEST_F(Bzip2DecoderTest, TheMemoryLimitRefusesALevelItCannotHold) {
   Bytes z = bzref::compress(words(1000), 9), out;
   gcomp_options_t * o = Opts();

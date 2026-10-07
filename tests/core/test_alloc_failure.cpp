@@ -36,6 +36,7 @@
 #include "failing_allocator.h"
 
 #include <ghoti.io/compress/brotli.h>
+#include <ghoti.io/compress/bzip2.h>
 #include <ghoti.io/compress/lzma.h>
 #include <ghoti.io/compress/compress.h>
 #include <ghoti.io/compress/deflate.h>
@@ -184,6 +185,9 @@ gcomp_status_t register_all(gcomp_registry_t * reg) {
     return s;
   }
   if ((s = gcomp_method_lzma2_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_bzip2_register(reg)) != GCOMP_OK) {
     return s;
   }
   return gcomp_method_zstd_register(reg);
@@ -855,6 +859,33 @@ void add_scenarios(std::vector<Scenario> & out) {
       Mode::ResetReuse, false});
   out.push_back({"lzma2/empty", "lzma2", lzma_opts("lzma2", false), empty,
       Mode::StreamingTiny, true});
+
+  // bzip2 allocates a block, its sorted copy, the suffix sorter's two arrays
+  // and a stage up front, then a scratch set for each block and the sorter's
+  // own per-level arrays during it. Level 1 keeps each attempt small, and the
+  // 300 KiB input is three blocks, so the mid-stream emission and the
+  // allocations of the second and third block are swept as well as the first.
+  auto bz_level = [](int64_t level) {
+    return [level](gcomp_options_t * o) {
+      gcomp_options_set_int64(o, "bzip2.level", level);
+    };
+  };
+  out.push_back({"bzip2/text", "bzip2", bz_level(1), text,
+      Mode::StreamingTiny, true});
+  out.push_back({"bzip2/runs", "bzip2", bz_level(1), runs,
+      Mode::StreamingTiny, false});
+  out.push_back({"bzip2/random", "bzip2", bz_level(1), rnd,
+      Mode::StreamingTiny, false});
+  out.push_back({"bzip2/mixed-long", "bzip2", bz_level(1), brotli_long,
+      Mode::StreamingTiny, false});
+  out.push_back({"bzip2/flush", "bzip2", bz_level(1), text,
+      Mode::StreamingFlush, true});
+  out.push_back({"bzip2/buffer", "bzip2", bz_level(1), mixed, Mode::Buffer,
+      false});
+  out.push_back({"bzip2/reset", "bzip2", bz_level(1), text, Mode::ResetReuse,
+      false});
+  out.push_back({"bzip2/empty", "bzip2", bz_level(1), empty,
+      Mode::StreamingTiny, true});
 }
 
 //
@@ -911,6 +942,9 @@ TEST(AllocFailure, Lzma) {
 }
 TEST(AllocFailure, Lzma2) {
   sweep_method("lzma2");
+}
+TEST(AllocFailure, Bzip2) {
+  sweep_method("bzip2");
 }
 
 /**

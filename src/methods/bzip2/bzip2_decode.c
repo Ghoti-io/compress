@@ -441,6 +441,7 @@ static gcomp_status_t write_block(
 static gcomp_status_t drive(bz_dec_t * d, const uint8_t ** in,
     const uint8_t * end, gcomp_buffer_t * out, int * why) {
   int blocked = 0;
+  uint64_t checked = d->produced;
   gcomp_status_t s;
   while (!blocked) {
     refill(d, in, end);
@@ -722,7 +723,11 @@ static gcomp_status_t drive(bz_dec_t * d, const uint8_t ** in,
       return dec_fail(
           d, GCOMP_ERR_LIMIT, "bzip2: decompressed output exceeds the limit");
     }
-    if (d->state == ST_OUTPUT || blocked == BLOCKED_OUTPUT) {
+    /* After every step that wrote, and not only while a block is still being
+     * written: a block that fits the caller's buffer is written and finished in
+     * one step, which leaves the state at the next block's magic. */
+    if (d->produced != checked) {
+      checked = d->produced;
       if (gcomp_limits_check_expansion_ratio(
               d->in_total, d->produced, d->max_ratio) != GCOMP_OK) {
         return dec_fail(

@@ -37,7 +37,7 @@ namespace {
 
 /// Every method the library registers, so a new one cannot quietly opt out.
 const char * const kMethods[] = {"rle", "lzw", "lz4", "deflate", "gzip",
-    "zlib", "zstd", "brotli", "lzma2"};
+    "zlib", "zstd", "brotli", "lzma2", "bzip2"};
 
 /**
  * Data with three characters: text that compresses through matches, a long
@@ -364,6 +364,9 @@ TEST_F(FlushTest, AFlushBeforeTheFirstUpdateLeavesRoomForALargeOne) {
           }
           else if (!strcmp(method, "lzma2")) {
             key = "lzma2.preset", lo = 0, hi = 6;
+          }
+          else if (!strcmp(method, "bzip2")) {
+            key = "bzip2.level", lo = 1, hi = 9;
           }
           if (!key) {
             continue;

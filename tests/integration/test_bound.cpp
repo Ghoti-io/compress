@@ -286,6 +286,14 @@ std::vector<Config> configurations() {
         }});
   }
 
+  c.push_back({"bzip2/default", "bzip2", nullptr});
+  for (int64_t level : {1, 9}) {
+    c.push_back({"bzip2/level" + std::to_string(level), "bzip2",
+        [level](gcomp_options_t * o) {
+          gcomp_options_set_int64(o, "bzip2.level", level);
+        }});
+  }
+
   c.push_back({"lzma2/default", "lzma2", nullptr});
   for (int64_t preset : {0, 6}) {
     c.push_back({"lzma2/preset" + std::to_string(preset), "lzma2",
@@ -413,6 +421,9 @@ TEST(EncodeBound, Brotli) {
 
 TEST(EncodeBound, Lzma2) {
   sweep_method("lzma2");
+}
+TEST(EncodeBound, Bzip2) {
+  sweep_method("bzip2");
 }
 
 /**
@@ -570,7 +581,7 @@ TEST(EncodeBound, IsNotWildlyLoose) {
 
   for (const char * method :
       {"deflate", "zlib", "gzip", "zstd", "lz4", "rle", "lzw", "brotli",
-          "lzma2"}) {
+          "lzma2", "bzip2"}) {
     size_t bound = 0;
     ASSERT_EQ(gcomp_encode_bound(nullptr, method, nullptr, n, &bound),
         GCOMP_OK);
@@ -724,7 +735,7 @@ TEST(EncodeBound, AnUnrepresentableBoundIsRefused) {
   const size_t kMax = (size_t)-1;
   for (const char * method :
       {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli",
-          "lzma2"}) {
+          "lzma2", "bzip2"}) {
     // Each of these is larger than SIZE_MAX minus the framing every format
     // here charges for an input that long, so none of their bounds fits in a
     // size_t. Three quarters of SIZE_MAX does fit for several of them, which
@@ -748,7 +759,7 @@ TEST(EncodeBound, AnUnrepresentableBoundIsRefused) {
 TEST(EncodeBound, EmptyInput) {
   for (const char * method :
       {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli",
-          "lzma2"}) {
+          "lzma2", "bzip2"}) {
     size_t bound = 0;
     ASSERT_EQ(gcomp_encode_bound(nullptr, method, nullptr, 0, &bound),
         GCOMP_OK)

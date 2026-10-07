@@ -548,6 +548,7 @@ const char * kLzmaDict() { return "lzma.dict_size"; }
 const char * kLzma2Preset() { return "lzma2.preset"; }
 const char * kLzma2Lc() { return "lzma2.lc"; }
 const char * kLzma2Dict() { return "lzma2.dict_size"; }
+const char * kBzip2Level() { return "bzip2.level"; }
 void setZeroOutputAndRatio(gcomp_options_t * o) {
   gcomp_options_set_uint64(o, "limits.max_output_bytes", 0);
   gcomp_options_set_uint64(o, "limits.max_expansion_ratio", 0);
@@ -633,6 +634,14 @@ TEST(OptionValidationTest, MistakesAreRejectedAtCreateTime) {
           GCOMP_ERR_INVALID_ARG},
       {"lzma2.dict_size below the minimum", "lzma2",
           setLzmaUint<kLzma2Dict, 4095>, GCOMP_ERR_INVALID_ARG},
+      {"bzip2.level below the minimum", "bzip2", setLzmaInt<kBzip2Level, 0>,
+          GCOMP_ERR_INVALID_ARG},
+      {"bzip2.level at the minimum", "bzip2", setLzmaInt<kBzip2Level, 1>,
+          GCOMP_OK},
+      {"bzip2.level at the maximum", "bzip2", setLzmaInt<kBzip2Level, 9>,
+          GCOMP_OK},
+      {"bzip2.level above the maximum", "bzip2", setLzmaInt<kBzip2Level, 10>,
+          GCOMP_ERR_INVALID_ARG},
   };
 
   for (const Case & c : kCases) {
@@ -649,7 +658,7 @@ TEST(OptionValidationTest, ZeroIsAcceptedForTheLimitsThatMeanUnlimited) {
   // value before the method ever sees it.  lz4 and zstd both declared one.
   for (const char * method :
       {"lz4", "zstd", "lzw", "rle", "deflate", "gzip", "brotli", "lzma",
-          "lzma2"}) {
+          "lzma2", "bzip2"}) {
     EXPECT_EQ(createEncoderWith(method, setZeroOutputAndRatio), GCOMP_OK)
         << method << ": zero output/ratio limits must be accepted";
     EXPECT_EQ(createDecoderWith(method, setZeroOutputAndRatio), GCOMP_OK)

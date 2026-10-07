@@ -68,6 +68,21 @@ static inline uint32_t bzip2_combine(uint32_t combined, uint32_t block_crc) {
   return ((combined << 1) | (combined >> 31)) ^ block_crc;
 }
 
+/** Scratch for the transform: 2n + 1 symbols of text and of suffix array. */
+typedef struct bzip2_bwt_scratch_s {
+  int32_t * s;
+  int32_t * sa;
+} bzip2_bwt_scratch_t;
+
+/**
+ * The Burrows-Wheeler transform of a block of n >= 1 bytes: the last column of
+ * its sorted rotations into `last`, and the row the unrotated block is in. The
+ * scratch holds at least 2n + 1 entries of each. Returns 0, or -1 if memory
+ * ran out.
+ */
+int bzip2_bwt(const gcomp_allocator_t * alloc, bzip2_bwt_scratch_t * scratch,
+    const uint8_t * block, uint32_t n, uint8_t * last, uint32_t * orig_ptr);
+
 gcomp_status_t bzip2_encoder_init(gcomp_registry_t * registry,
     gcomp_options_t * options, gcomp_encoder_t * encoder);
 void bzip2_encoder_destroy(gcomp_encoder_t * encoder);

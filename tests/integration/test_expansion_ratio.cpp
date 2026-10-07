@@ -45,6 +45,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <ghoti.io/compress/bzip2.h>
 #include <ghoti.io/compress/brotli.h>
 #include <ghoti.io/compress/lzma.h>
 #include <ghoti.io/compress/compress.h>
@@ -443,6 +444,7 @@ const MethodCase k_methods[] = {
     {"rle", nullptr, 0, GCOMP_RLE_MAX_EXPANSION_RATIO},
     {"brotli", "brotli.level", 1, GCOMP_BROTLI_MAX_EXPANSION_RATIO},
     {"lzma2", "lzma2.preset", 3, GCOMP_LZMA_MAX_EXPANSION_RATIO},
+    {"bzip2", "bzip2.level", 9, GCOMP_BZIP2_MAX_EXPANSION_RATIO},
 };
 
 /**

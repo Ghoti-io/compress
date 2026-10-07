@@ -25,7 +25,7 @@ libc.
 | `"gzip"` | RFC 1952. |
 | `"lz4"` | `threads.count` encodes blocks in parallel. That output is byte-identical to the single-threaded stream. |
 | `"brotli"` | RFC 7932. Level 1 (the default) writes LZ77 and Huffman; level 0 stores uncompressed meta-blocks. The decoder reads the format. |
-| `"bzip2"` | Streams of Burrows-Wheeler blocks, as `bzip2` and libbz2 write them. Decode only so far. |
+| `"bzip2"` | Streams of Burrows-Wheeler blocks, as `bzip2` and libbz2 write them. The encoder sorts with SA-IS and is within a few bytes of libbz2's size; a flush ends the stream. |
 | `"lzma"`, `"lzma2"` | LZMA-alone (`.lzma`, or raw with `lzma.raw`) and the LZMA2 chunk framing. The encoder is a fast-mode parser, within a few percent of liblzma at presets 0 to 3. |
 | `"lzw"`, `"rle"` | The same registry, the same buffer rule. |
 | `"zstd"` | `threads.count` encodes blocks in parallel. `seekable.h` is random access into a seekable frame. |
