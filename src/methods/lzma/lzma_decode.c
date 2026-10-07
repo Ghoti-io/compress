@@ -124,9 +124,13 @@ typedef struct lzma_dec_s {
 
 /* ---- range decoder ------------------------------------------------------- */
 
-static inline void rc_norm(lzma_rc_t * rc) {
+/* Only a dry run can run out of input: a real one is started with a symbol's
+ * worth in hand (LZMA_REQUIRED_INPUT_MAX bytes, the most any symbol takes) or
+ * after a dry run found the whole symbol there, so it does not look. `dry` is
+ * a constant wherever this is inlined, and the check goes with it. */
+static inline void rc_norm(lzma_rc_t * rc, int dry) {
   if (rc->range < LZMA_TOP) {
-    if (rc->in == rc->in_end) {
+    if (dry && rc->in == rc->in_end) {
       rc->starved = 1;
       return;
     }
@@ -135,30 +139,30 @@ static inline void rc_norm(lzma_rc_t * rc) {
   }
 }
 
+/* One bit, without a branch on its value. Which way a bit goes is close to a
+ * coin toss for much of the stream, and a branch on it is mispredicted about as
+ * often as not, which costs more than the dozen instructions this takes. The
+ * mask is all ones for a 1 and zero for a 0, and selects the new range, the
+ * change to the code and the adaptation of the probability: a 0 moves it up by
+ * a thirty-second of the distance to 2048 and a 1 moves it down by a
+ * thirty-second of itself, so both are a thirty-second of something, added or
+ * taken away (t ^ mask) - mask being t or -t. */
 static inline unsigned rc_bit(lzma_rc_t * rc, uint16_t * prob, int dry) {
   uint32_t p = *prob;
   uint32_t bound = (rc->range >> LZMA_PROB_BITS) * p;
-  unsigned bit;
-  if (rc->code < bound) {
-    rc->range = bound;
-    if (!dry) {
-      *prob = (uint16_t)(p + ((LZMA_PROB_ONE - p) >> LZMA_MOVE_BITS));
-    }
-    bit = 0;
+  uint32_t mask = 0u - (uint32_t)(rc->code >= bound);
+  rc->range = (bound & ~mask) | ((rc->range - bound) & mask);
+  rc->code -= bound & mask;
+  if (!dry) {
+    uint32_t up = LZMA_PROB_ONE - p;
+    uint32_t t = (up ^ ((up ^ p) & mask)) >> LZMA_MOVE_BITS;
+    *prob = (uint16_t)(p + ((t ^ mask) - mask));
   }
-  else {
-    rc->range -= bound;
-    rc->code -= bound;
-    if (!dry) {
-      *prob = (uint16_t)(p - (p >> LZMA_MOVE_BITS));
-    }
-    bit = 1;
-  }
-  rc_norm(rc);
-  return bit;
+  rc_norm(rc, dry);
+  return (unsigned)(mask & 1u);
 }
 
-static inline uint32_t rc_direct(lzma_rc_t * rc, unsigned count) {
+static inline uint32_t rc_direct(lzma_rc_t * rc, unsigned count, int dry) {
   uint32_t res = 0;
   while (count--) {
     uint32_t t;
@@ -166,7 +170,7 @@ static inline uint32_t rc_direct(lzma_rc_t * rc, unsigned count) {
     rc->code -= rc->range;
     t = 0u - (rc->code >> 31);
     rc->code += rc->range & t;
-    rc_norm(rc);
+    rc_norm(rc, dry);
     res = (res << 1) + t + 1u;
   }
   return res;
@@ -247,6 +251,47 @@ static inline int dict_put(lzma_dec_t * d, uint8_t b) {
   return 0;
 }
 
+/* The match at `dist` back, n bytes of it, into the window and out. This is
+ * the whole of a match when neither the source nor the destination wraps
+ * round the window and the window need not grow across it, which is nearly
+ * always, and it is then done in chunks instead of a byte at a time: sixteen
+ * bytes at once where the distance is at least sixteen (a chunk's source is
+ * then wholly behind its destination, so copying forward chunk by chunk is the
+ * same as copying forward byte by byte), and a byte loop for the short
+ * distances, which are runs and short periods. Not a byte is written beyond
+ * the run: in a window that has wrapped, what lies past the write position is
+ * the oldest history, and a match may still ask for it. Returns 0, having
+ * written nothing, when it cannot. */
+static inline int dict_copy_run(
+    lzma_dec_t * d, size_t dist, size_t n, uint8_t * out) {
+  uint8_t * dst;
+  const uint8_t * src;
+  if (d->pos < dist || d->pos + n > d->cap) {
+    return 0;
+  }
+  dst = d->buf + d->pos;
+  src = dst - dist;
+  if (dist >= 16) {
+    size_t i = 0;
+    for (; i + 16u <= n; i += 16) {
+      memcpy(dst + i, src + i, 16);
+    }
+    if (i < n) {
+      memcpy(dst + i, src + i, n - i);
+    }
+  }
+  else {
+    size_t i;
+    for (i = 0; i < n; i++) {
+      dst[i] = src[i];
+    }
+  }
+  memcpy(out, dst, n);
+  d->pos += n;
+  d->total += n;
+  return 1;
+}
+
 /* ---- one symbol --------------------------------------------------------- */
 
 static inline unsigned parse_len(lzma_rc_t * rc, lzma_len_probs_t * l,
@@ -277,7 +322,7 @@ static inline uint32_t parse_dist(
     dist += bit_tree_reverse(rc, P->pos_spec + dist - slot, direct_bits, dry);
   }
   else {
-    dist += rc_direct(rc, direct_bits - LZMA_ALIGN_BITS) << LZMA_ALIGN_BITS;
+    dist += rc_direct(rc, direct_bits - LZMA_ALIGN_BITS, dry) << LZMA_ALIGN_BITS;
     dist += bit_tree_reverse(rc, P->align, LZMA_ALIGN_BITS, dry);
   }
   return dist;
@@ -285,7 +330,7 @@ static inline uint32_t parse_dist(
 
 /* Decode one symbol from rc. With dry set nothing but rc is written, so the
  * same code answers "is the whole symbol here" and "what is it". */
-static inline void parse(
+static inline __attribute__((always_inline)) void parse_body(
     lzma_dec_t * d, lzma_rc_t * rc, lzma_sym_t * s, int dry) {
   lzma_probs_t * P = &d->probs;
   unsigned state = d->state;
@@ -348,6 +393,16 @@ static inline void parse(
   len = parse_len(rc, &P->rep_len, pos_state, dry);
   s->kind = SYM_REP;
   s->len = len + LZMA_MATCH_MIN;
+}
+
+/* The symbol parser works on a copy of the range decoder, which is what lets
+ * the compiler keep its range, code and input pointer in registers across the
+ * dozens of bits one symbol takes instead of loading and storing them through
+ * the caller's struct at every bit. */
+static void parse(lzma_dec_t * d, lzma_rc_t * rc, lzma_sym_t * s, int dry) {
+  lzma_rc_t local = *rc;
+  parse_body(d, &local, s, dry);
+  *rc = local;
 }
 
 /* ---- the core: parse, apply, and the streaming around it ---------------- */
@@ -441,11 +496,28 @@ static lzma_run_t core_run(lzma_dec_t * d, const uint8_t ** inp,
   }
 
   for (;;) {
-    lzma_sym_t s;
+    /* Zeroed because GCC on s390x at -O3 cannot see that a literal's byte is
+     * set before it is read, and -Werror makes that a build failure there. */
+    lzma_sym_t s = {0};
     lzma_rc_t rc;
     uint8_t tmp[LZMA_REQUIRED_INPUT_MAX];
     size_t avail;
 
+    if (d->remain_len != 0 && left != 0 && room != 0) {
+      size_t n = d->remain_len;
+      if (n > left) {
+        n = left;
+      }
+      if (n > room) {
+        n = room;
+      }
+      if (dict_copy_run(d, (size_t)d->rep[0] + 1u, n, out + *out_used)) {
+        *out_used += n;
+        left -= n;
+        room -= n;
+        d->remain_len -= (unsigned)n;
+      }
+    }
     while (d->remain_len != 0 && left != 0 && room != 0) {
       uint8_t b = dict_byte(d, (uint64_t)d->rep[0] + 1u);
       if (dict_put(d, b) != 0) {

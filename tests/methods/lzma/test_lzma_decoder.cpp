@@ -261,6 +261,51 @@ TEST_F(LzmaDecoderTest, GivesTheSameAnswerForEveryWindowOfInputAndOutput) {
   }
 }
 
+/**
+ * A window that has gone round. Once the window is full the decoder writes a
+ * match into the space just ahead of the write position, and that space holds
+ * the oldest history, which a match may still reach: a copy that ran past the
+ * end of its run, to be quick, would put garbage where a later match goes
+ * looking. The smallest dictionary liblzma writes is 4096 bytes, and data that
+ * repeats a block of 3,000 to 4,000 bytes after a short gap makes matches
+ * reach nearly all the way back, every time round, with runs and short periods
+ * among them for the byte-at-a-time arm. The output windows go from one byte
+ * (every match parked and resumed) to larger than a match.
+ */
+TEST_F(LzmaDecoderTest, ReadsAWindowThatHasGoneRoundManyTimes) {
+  /* Built of copies, back to back: each repeats from a distance up to the
+   * whole window, a quarter of them from within sixteen bytes of the far end,
+   * for a few to a few hundred bytes, with a stray byte now and then. A match
+   * from near the far end reads the bytes just ahead of the write position,
+   * which is where a copy that overran its run would have left garbage. */
+  Bytes data(4096);
+  g_seed = 1234;
+  for (auto & x : data) {
+    x = (uint8_t)next_rand();
+  }
+  while (data.size() < 400000) {
+    size_t d = (next_rand() % 4 == 0) ? 4080 + next_rand() % 16
+                                      : 1 + next_rand() % 4095;
+    const size_t len = 2 + next_rand() % 300;
+    for (size_t i = 0; i < len; i++) {
+      data.push_back(data[data.size() - d]);
+    }
+    if (next_rand() % 8 == 0) {
+      data.push_back((uint8_t)next_rand());
+    }
+  }
+  for (uint32_t preset : {1u, 6u}) {
+    Bytes in = lzmaref::alone_encode(data, lzmaref::options(preset, -1, -1, -1, 4096));
+    ASSERT_FALSE(in.empty());
+    for (size_t oc : {size_t(1), size_t(7), size_t(300), size_t(1 << 16)}) {
+      Bytes out;
+      ASSERT_EQ(Decode("lzma", in, out, 4096, oc), GCOMP_OK)
+          << "preset " << preset << " out " << oc;
+      ASSERT_EQ(out, data) << "preset " << preset << " out " << oc;
+    }
+  }
+}
+
 TEST_F(LzmaDecoderTest, ReadsRawLzma1WithTheCallersProperties) {
   const Bytes data = mixed(100000);
   for (int lc : {0, 3, 4}) {
