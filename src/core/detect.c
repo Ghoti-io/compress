@@ -33,6 +33,7 @@
  * | gzip | `1f 8b 08` | RFC 1952 section 2.3.1 (ID1, ID2, CM) |
  * | zstd | `28 b5 2f fd` | RFC 8878 section 3.1.1, Magic_Number 0xFD2FB528 |
  * | lz4 | `04 22 4d 18` | LZ4 Frame Format, Magic Number 0x184D2204 |
+ * | bzip2 | `42 5a 68 31`..`39` | "BZh" and a level digit, which libbz2's format opens with |
  *
  * zlib has no magic number.  RFC 1950 section 2.2 gives it two header bytes
  * with enough structure to test: the compression method must be 8 (one byte
@@ -169,6 +170,13 @@ gcomp_status_t gcomp_detect(const void * input, size_t input_size,
     // the only value the specification defines.
     if (p[offset] == 0x1Fu && p[offset + 1] == 0x8Bu && p[offset + 2] == 0x08u) {
       *method_name_out = "gzip";
+      return GCOMP_OK;
+    }
+    // "BZh" and a level digit, 1 to 9: bzip2's stream header. Four bytes of
+    // it, and the digit has nine values of 256, so one random word in 2^27.
+    if (p[offset] == 'B' && p[offset + 1] == 'Z' && p[offset + 2] == 'h' &&
+        p[offset + 3] >= '1' && p[offset + 3] <= '9') {
+      *method_name_out = "bzip2";
       return GCOMP_OK;
     }
     // Last, and a guess: see the note at the top of this file.

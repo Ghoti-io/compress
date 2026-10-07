@@ -366,6 +366,9 @@ tests/
 │   │   ├── test_brotli_encoder.cpp # Arguments, reset, back-pressure, skewed alphabets
 │   │   ├── test_brotli_register.cpp # peek across every window; table bounds
 │   │   └── test_brotli_robustness.cpp # Hand-built streams, corruption sweep
+│   ├── bzip2/                    # bzip2 method tests
+│   │   ├── bzip2_oracle.h        # libbz2 loaded at run time, as the reference
+│   │   └── test_bzip2_decoder.cpp # Against libbz2, byte-at-a-time, hand-built malformed blocks
 │   ├── lzma/                     # LZMA and LZMA2 method tests
 │   │   ├── lzma_oracle.h         # liblzma loaded at run time, as the reference
 │   │   ├── test_lzma_decoder.cpp # Against liblzma, byte-at-a-time, malformed chunks

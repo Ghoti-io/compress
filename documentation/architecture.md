@@ -120,11 +120,11 @@ headers, so anything in the tree above is part of what a consumer receives.
 The following are used only inside the library and are **not** part of the public API. Do not include them from application code; they may change or be removed without notice.
 
 - **Core internal:** `endian.h`, `alloc_internal.h`, `registry_internal.h`, `stream_internal.h`, and other `*_internal.h` under `src/core/`. Overflow-checked size arithmetic comes from cutil (`<ghoti.io/cutil/safemath.h>`); it used to be a local `safe_math.h` carrying the same functions.
-- **Method internal:** Each method has an `*_internal.h` (e.g. `deflate_internal.h`, `gzip_internal.h`, `lz4_internal.h`, `zstd_internal.h`, `rle_internal.h`, `lzw_internal.h`, `brotli_internal.h`, `lzma_internal.h`) for shared state and helpers within that method only. Some methods also use internal-only modules (e.g. `lzw_hash.h` / `lzw_hash.c`).
+- **Method internal:** Each method has an `*_internal.h` (e.g. `deflate_internal.h`, `gzip_internal.h`, `lz4_internal.h`, `zstd_internal.h`, `rle_internal.h`, `lzw_internal.h`, `brotli_internal.h`, `lzma_internal.h`, `bzip2_internal.h`) for shared state and helpers within that method only. Some methods also use internal-only modules (e.g. `lzw_hash.h` / `lzw_hash.c`).
 
 ### Method Layer
 
-Each compression method (deflate, gzip, zlib, LZ4, LZW, RLE, zstd, brotli, lzma, lzma2) implements the `gcomp_method_t` interface:
+Each compression method (deflate, gzip, zlib, LZ4, LZW, RLE, zstd, brotli, lzma, lzma2, bzip2) implements the `gcomp_method_t` interface:
 
 ```c
 struct gcomp_method_s {
@@ -517,6 +517,7 @@ compress/
 │   ├── limits.h                  # Safety limits
 │   ├── brotli.h                  # Brotli-specific API
 │   ├── lzma.h                    # LZMA and LZMA2 registration
+│   ├── bzip2.h                   # bzip2 registration
 │   ├── deflate.h                 # Deflate-specific API
 │   ├── gzip.h                    # Gzip-specific API
 │   ├── lz4.h                     # LZ4-specific API
@@ -571,6 +572,10 @@ compress/
 │       │   ├── brotli_dict.c     # Static dictionary transforms
 │       │   ├── brotli_tables.c   # Dictionary, transforms, context LUTs
 │       │   └── brotli_register.c # Vtable and registration
+│       ├── bzip2/
+│       │   ├── bzip2_decode.c    # State machine for the bits, then the sorted list
+│       │   ├── bzip2_crc.c       # The MSB-first CRC-32 table
+│       │   └── bzip2_register.c  # Vtable and registration
 │       ├── lzma/
 │       │   ├── lzma_decode.c     # Both decoders: one parse, a carry, a growing window
 │       │   ├── lzma_encode.c     # Range coder, match finder, fast parser, LZMA2 chunks
