@@ -65,6 +65,13 @@ FROM docker.io/library/debian@sha256:7792b1f7702a86946cd518db72b6a407302c3e9bc16
 # libbrotli1  the runtime library the brotli oracles dlopen. Same shape as
 #           liblz4: libbrotlienc.so.1 and libbrotlidec.so.1, no -dev package
 #           and no CLI. The version probe calls BrotliEncoderVersion()
+# liblzma5  the runtime library the LZMA and LZMA2 oracles dlopen
+#           (liblzma.so.5). The base image already carries it, at whatever the
+#           snapshot holds, which is exactly the unpinned shape this file
+#           exists to remove: naming it here makes the version a pin, and the
+#           run-time probe calls lzma_version_string(). No xz CLI, no -dev
+# libbz2-1.0  the same for the bzip2 oracles (libbz2.so.1.0), probed with
+#           BZ2_bzlibVersion(). Also in the base, also pinned here by name
 # gzip      the CLI reference for the gzip method
 # python3   the interpreter that runs the zlib, gzip and pyzstd references; its
 #           zlib module is the RFC 1950 and RFC 1952 reference, and the version
@@ -83,6 +90,8 @@ RUN apt-get update -qq \
       libzstd1=1.5.7+dfsg-1 \
       liblz4-1=1.10.0-4 \
       libbrotli1=1.1.0-2+b7 \
+      liblzma5=5.8.1-1+deb13u1 \
+      libbz2-1.0=1.0.8-6 \
       gzip=1.13-1+deb13u1 \
       python3=3.13.5-1 \
       python3-pip=25.1.1+dfsg-1 \
@@ -113,10 +122,11 @@ RUN pip install --no-cache-dir --no-compile --break-system-packages \
 # file literally, which puts a quoting layer between a check and the fact it
 # checks.
 COPY zstd-version lz4-version brotli-version zlib-version gzip-version \
-     pyzstd-version /usr/local/bin/
+     pyzstd-version lzma-version bzip2-version /usr/local/bin/
 RUN chmod +x /usr/local/bin/zstd-version /usr/local/bin/lz4-version \
       /usr/local/bin/brotli-version /usr/local/bin/zlib-version \
-      /usr/local/bin/gzip-version /usr/local/bin/pyzstd-version
+      /usr/local/bin/gzip-version /usr/local/bin/pyzstd-version \
+      /usr/local/bin/lzma-version /usr/local/bin/bzip2-version
 
 # A locale, pinned, because `regex` lost 1,855 differential rows to an image
 # that had none (section 1.1). Nothing here is known to read it - these
@@ -125,4 +135,4 @@ RUN chmod +x /usr/local/bin/zstd-version /usr/local/bin/lz4-version \
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 ENTRYPOINT []
-CMD ["sh", "-c", "zstd-version; lz4-version; brotli-version; zlib-version; gzip-version; pyzstd-version"]
+CMD ["sh", "-c", "zstd-version; lz4-version; brotli-version; zlib-version; gzip-version; pyzstd-version; lzma-version; bzip2-version"]

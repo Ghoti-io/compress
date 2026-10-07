@@ -2629,7 +2629,7 @@ ORACLE_TESTS := $(addprefix $(APP_DIR)/,$(addsuffix $(EXE_EXTENSION),$(ORACLE_TE
 
 oracle-build: ## Build the pinned oracle image from its Containerfile
 	@printf "\n### Building the oracle reference image ###\n"
-	podman build -t ghoti-compress-oracle-refs:deb13-3 \
+	podman build -t ghoti-compress-oracle-refs:deb13-4 \
 		-f $(ORACLE)/containers/refs/Containerfile \
 		$(ORACLE)/containers/refs
 

@@ -40,7 +40,7 @@
 # answer that disagrees is a finding to triage rather than a regression to fix.
 #
 # Building it:
-#   podman build -t ghoti-compress-oracle-refs:deb13-3 \
+#   podman build -t ghoti-compress-oracle-refs:deb13-4 \
 #       -f tools/oracle/containers/refs/Containerfile \
 #       tools/oracle/containers/refs
 # `make oracle-build` does exactly that.
@@ -49,7 +49,7 @@
 # set, and `deb13` because Debian 13 is what fixes four of the five. The serial
 # moves whenever the image's contents can differ - `-2` is the move to a dated
 # snapshot, which changed no reference version but did change the transitive
-# closure the build reads, and `-3` adds libbrotli 1.1.0. A tag has to say
+# closure the build reads, and `-3` adds libbrotli 1.1.0, and `-4` names liblzma 5.8.1 and libbz2 1.0.8, which the base carried unpinned. A tag has to say
 # what is in it, which is why
 # `:latest` is never one here (section 6.1).
 #
@@ -59,12 +59,14 @@
 # Containerfile are exact, and everything they pull comes from one frozen archive
 # state, so the whole closure is reproducible and not just the six lines below.
 
-zstd	localhost/ghoti-compress-oracle-refs:deb13-3	zstd 1.5.7	Frames, blocks, dictionaries and the seek table, via the CLI both ways
-liblz4	localhost/ghoti-compress-oracle-refs:deb13-3	liblz4 1.10.0	The LZ4 frame and block formats, and frames no code here wrote
-libbrotli	localhost/ghoti-compress-oracle-refs:deb13-3	libbrotli 1.1.0	RFC 7932, both directions, via libbrotlienc.so.1 and libbrotlidec.so.1
-zlib	localhost/ghoti-compress-oracle-refs:deb13-3	zlib 1.3.1	RFC 1950 and RFC 1951: what we write, read back by another implementation
-gzip	localhost/ghoti-compress-oracle-refs:deb13-3	gzip 1.13	RFC 1952 member structure, through the CLI
-pyzstd	localhost/ghoti-compress-oracle-refs:deb13-3	pyzstd 0.19.1 zstd 1.5.7	The seekable format (SeekableZstdFile) and dictionary training
+zstd	localhost/ghoti-compress-oracle-refs:deb13-4	zstd 1.5.7	Frames, blocks, dictionaries and the seek table, via the CLI both ways
+liblz4	localhost/ghoti-compress-oracle-refs:deb13-4	liblz4 1.10.0	The LZ4 frame and block formats, and frames no code here wrote
+libbrotli	localhost/ghoti-compress-oracle-refs:deb13-4	libbrotli 1.1.0	RFC 7932, both directions, via libbrotlienc.so.1 and libbrotlidec.so.1
+zlib	localhost/ghoti-compress-oracle-refs:deb13-4	zlib 1.3.1	RFC 1950 and RFC 1951: what we write, read back by another implementation
+gzip	localhost/ghoti-compress-oracle-refs:deb13-4	gzip 1.13	RFC 1952 member structure, through the CLI
+pyzstd	localhost/ghoti-compress-oracle-refs:deb13-4	pyzstd 0.19.1 zstd 1.5.7	The seekable format (SeekableZstdFile) and dictionary training
+liblzma	localhost/ghoti-compress-oracle-refs:deb13-4	liblzma 5.8.1	LZMA and LZMA2, both directions, via liblzma.so.5
+libbz2	localhost/ghoti-compress-oracle-refs:deb13-4	libbz2 1.0.8	bzip2, both directions, via libbz2.so.1.0
 
 # The second reading, and it is not a gating pin. `unicode`'s python/python-next
 # shape: one reference that is a release and one ahead of it, whose disagreements

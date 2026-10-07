@@ -1,0 +1,11 @@
+#!/bin/sh
+# liblzma's own claim, asked the way the tests ask it.
+#
+# No xz CLI in this image: the LZMA oracles dlopen liblzma.so.5 and replicate
+# only the head of its structs, so this loads the same soname and calls
+# lzma_version_string(). The package is 5.8.1-1+deb13u1; the library says 5.8.1.
+exec python3 -c '
+import ctypes
+lib = ctypes.CDLL("liblzma.so.5")
+lib.lzma_version_string.restype = ctypes.c_char_p
+print("liblzma", lib.lzma_version_string().decode())'

@@ -53,7 +53,8 @@ import oracle_env  # noqa: E402
 # every pin is checked before any binary runs, because a partial check would let
 # a run start against an unverified reference - but printed, so the line above a
 # failure names the references that failure was measured against.
-ALL = ["zstd", "liblz4", "libbrotli", "zlib", "gzip", "pyzstd"]
+ALL = ["zstd", "liblz4", "libbrotli", "zlib", "gzip", "pyzstd",
+       "liblzma", "libbz2"]
 
 RAN = re.compile(r"^\[=+\] (\d+) tests? from \d+ test suites? ran", re.M)
 PASSED = re.compile(r"^\[  PASSED  \] (\d+) tests?", re.M)

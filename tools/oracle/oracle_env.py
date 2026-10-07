@@ -15,7 +15,7 @@
 is changed, and each of the three is forced by something about this library
 rather than chosen:
 
-  1. **The PROBE table names six references and they share one image.** The
+  1. **The PROBE table names eight references and they share one image.** The
      other libraries have an image per reference. Here one test binary consults
      three of them in a single run, and `/usr/bin/zstd` links `liblz4.so.1`, so
      the set cannot be split without an image whose pinned CLI does not run.
@@ -96,6 +96,8 @@ PROBE = {
     "zlib": (["zlib-version"], "zlib "),
     "gzip": (["gzip-version"], "gzip "),
     "pyzstd": (["pyzstd-version"], "pyzstd "),
+    "liblzma": (["lzma-version"], "liblzma "),
+    "libbz2": (["bzip2-version"], "libbz2 "),
     # The alias target. Same probe script: the image puts its zstd in
     # /usr/local/bin, which precedes /usr/bin, so `zstd --version` reports the
     # built one without the probe knowing anything about it.
@@ -122,6 +124,14 @@ HOST_PROBE = {
         "import zlib; print('zlib', zlib.ZLIB_RUNTIME_VERSION)"],
     "gzip": ["sh", "-c",
         "gzip --version 2>&1 | sed -n '1s/^gzip \\([0-9][0-9.]*\\).*/gzip \\1/p'"],
+    "liblzma": ["python3", "-c", "import ctypes;"
+        "l=ctypes.CDLL('liblzma.so.5');"
+        "l.lzma_version_string.restype=ctypes.c_char_p;"
+        "print('liblzma', l.lzma_version_string().decode())"],
+    "libbz2": ["python3", "-c", "import ctypes;"
+        "l=ctypes.CDLL('libbz2.so.1.0');"
+        "l.BZ2_bzlibVersion.restype=ctypes.c_char_p;"
+        "print('libbz2', l.BZ2_bzlibVersion().decode().split(',')[0])"],
     "pyzstd": ["python3", "-c", "import pyzstd;"
         "print('pyzstd', pyzstd.__version__, 'zstd', pyzstd.zstd_version)"],
     # No zstd-next: a host has one zstd, and a probe that reported it under both

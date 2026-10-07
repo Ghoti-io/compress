@@ -71,7 +71,7 @@ RUN make -C /src/programs -j"$(nproc)" zstd HAVE_ZLIB=0 HAVE_LZMA=0 HAVE_LZ4=0 \
 # The whole reference set, with this zstd in front of Debian's on PATH.
 # /usr/local/bin precedes /usr/bin, so the existing zstd-version probe reports
 # this one without being changed.
-FROM localhost/ghoti-compress-oracle-refs:deb13-3
+FROM localhost/ghoti-compress-oracle-refs:deb13-4
 
 COPY --from=build /src/programs/zstd /usr/local/bin/zstd
 

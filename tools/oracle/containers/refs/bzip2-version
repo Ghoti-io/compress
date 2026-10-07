@@ -1,0 +1,11 @@
+#!/bin/sh
+# libbz2's own claim, asked the way the tests ask it.
+#
+# No bzip2 CLI in this image: the bzip2 oracles dlopen libbz2.so.1.0, so this
+# loads the same soname and calls BZ2_bzlibVersion(), which answers
+# "1.0.8, 13-Jul-2019". The package is 1.0.8-6; the pin is the library's word.
+exec python3 -c '
+import ctypes
+lib = ctypes.CDLL("libbz2.so.1.0")
+lib.BZ2_bzlibVersion.restype = ctypes.c_char_p
+print("libbz2", lib.BZ2_bzlibVersion().decode().split(",")[0])'
