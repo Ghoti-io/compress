@@ -82,6 +82,49 @@ Bytes mixed(size_t n) {
   return t;
 }
 
+/// Text with the shape of source code: indentation that repeats, identifiers
+/// from a small vocabulary with numbers, operators, comments. Unlike words()
+/// it has short repeats at the last distance, runs of spaces and literals that
+/// cost more or less by context, which is what the parser's prices are about.
+Bytes source(size_t n, uint32_t seed = 21) {
+  static const char * id[] = {"count", "index", "buffer", "length", "state",
+      "result", "value", "offset", "table", "entry", "node", "next", "prev",
+      "flags", "size"};
+  Bytes out;
+  g_seed = seed;
+  auto put = [&](const std::string & t) { out.insert(out.end(), t.begin(), t.end()); };
+  while (out.size() < n) {
+    const std::string ind(2 * (next_rand() % 4), ' ');
+    const char * a = id[next_rand() % 15];
+    const char * b = id[next_rand() % 15];
+    const char * c = id[next_rand() % 15];
+    switch (next_rand() % 6) {
+    case 0:
+      put(ind + "for (i = 0; i < " + a + "; i++) {\n");
+      break;
+    case 1:
+      put(ind + a + "->" + b + " = " + c + "[" + a + " + " +
+          std::to_string(next_rand() % 100) + "];\n");
+      break;
+    case 2:
+      put(ind + "if (" + a + " != " + std::to_string(next_rand() % 64) +
+          ") return " + b + ";\n");
+      break;
+    case 3:
+      put(ind + "/* " + a + " of the " + b + " is " + c + " */\n");
+      break;
+    case 4:
+      put(ind + "static int " + a + "_" + std::to_string(next_rand() % 50) +
+          "(void) {\n");
+      break;
+    default:
+      put(ind + "}\n");
+    }
+  }
+  out.resize(n);
+  return out;
+}
+
 /// Text, then noise, then the same text again: matches 300000 bytes back.
 Bytes far_repeat() {
   Bytes a = noise(300000, 5);
@@ -107,6 +150,7 @@ const std::vector<Corpus> & corpus() {
       {"zeros1m", Bytes(1 << 20, 0)},
       {"mixed3m", mixed(3u << 20)},
       {"far", far_repeat()},
+      {"source600k", source(600000)},
   };
   return c;
 }
@@ -805,12 +849,11 @@ TEST_F(LzmaEncoderTest, TheBoundCoversEveryStreamAndOnlyLzma2HasOne) {
 }
 
 /**
- * How close the fast parser gets to liblzma, which at its higher presets
- * parses optimally. The ceilings are measured with a margin, so that they fail
- * on a regression and not on noise, and the one that is wide says so: preset 6
- * on text is the gap an optimal parser exists to close.
+ * How close the encoder gets to liblzma at each preset. The ceilings are measured with a margin, so that they fail
+ * on a regression and not on noise. Presets 3 and up use the optimal parser and
+ * are held to within about one percent of liblzma's.
  */
-TEST_F(LzmaEncoderTest, TheRatioStaysNearLiblzmaAtTheFastPresets) {
+TEST_F(LzmaEncoderTest, TheRatioStaysNearLiblzmaAtEveryPreset) {
   struct Case {
     const char * name;
     int preset;
@@ -821,8 +864,23 @@ TEST_F(LzmaEncoderTest, TheRatioStaysNearLiblzmaAtTheFastPresets) {
       {"words200k", 1, 1.03},
       {"mixed3m", 0, 1.03},
       {"mixed3m", 1, 1.03},
-      {"words200k", 6, 1.45},
-      {"mixed3m", 6, 1.08},
+      /* The optimal parser, which is what presets 3 and up use. Measured at
+       * 1.006, 1.001 and 1.006 (words, mixed, source) against preset 6, with
+       * ceilings a few tenths of a percent above, so that a parser that loses
+       * its prices or its repeats fails; preset 3 is smaller than liblzma's
+       * because liblzma's preset 3 does not search as hard as this one. */
+      {"words200k", 3, 0.78},
+      {"mixed3m", 3, 0.97},
+      {"words200k", 6, 1.008},
+      {"mixed3m", 6, 1.002},
+      {"words200k", 9, 1.008},
+      {"mixed3m", 9, 1.002},
+      {"noise100k", 6, 1.001},
+      {"zeros1m", 6, 1.10},
+      {"far", 6, 1.01},
+      {"source600k", 3, 0.75},
+      {"source600k", 6, 1.008},
+      {"source600k", 9, 1.008},
       {"noise100k", 1, 1.001},
       {"zeros1m", 1, 1.05},
       {"far", 1, 1.01},
@@ -844,6 +902,182 @@ TEST_F(LzmaEncoderTest, TheRatioStaysNearLiblzmaAtTheFastPresets) {
     EXPECT_LE((double)z.size(), k.ceiling * (double)ref.size())
         << k.name << " preset " << k.preset << ": " << z.size() << " against "
         << ref.size();
+  }
+}
+
+/**
+ * Parsing for price has to pay: at the same dictionary, the optimal parser
+ * (preset 3 and up) writes less than the fast one (preset 2 and down) on data
+ * with something to find, by enough that it is not noise. Without this a
+ * parser that quietly fell back to the fast path would pass every other test
+ * here, which only ask that the stream decode.
+ */
+TEST_F(LzmaEncoderTest, TheOptimalParserWritesLessThanTheFastOne) {
+  for (const char * name : {"words200k", "mixed3m"}) {
+    const Bytes * data = nullptr;
+    for (const auto & c : corpus()) {
+      if (std::string(name) == c.name) {
+        data = &c.data;
+      }
+    }
+    ASSERT_NE(data, nullptr) << name;
+    size_t fast = 0, optimal = 0;
+    for (int preset : {2, 3}) {
+      gcomp_options_t * o = Opts("lzma2", {{"preset", preset}});
+      Bytes z;
+      ASSERT_EQ(Encode("lzma2", *data, z, data->size(), 1 << 16, o), GCOMP_OK);
+      gcomp_options_destroy(o);
+      (preset == 2 ? fast : optimal) = z.size();
+    }
+    EXPECT_LT((double)optimal, 0.95 * (double)fast) << name;
+  }
+}
+
+/**
+ * The optimal parser plans a stretch ahead, and a plan can be cut short: an
+ * LZMA2 chunk ends where its compressed size reaches 64 KiB, a stored chunk
+ * throws the model away. Text, noise
+ * and zeros in alternation reach each of those, at input and output sizes that
+ * cut the plan at awkward places, and every result has to decode by both our
+ * decoder and liblzma's.
+ */
+TEST_F(LzmaEncoderTest, ThePlanSurvivesChunkEndsAndStoredChunks) {
+  Bytes data;
+  const Bytes text = words(300000, 11);
+  for (int round = 0; round < 3; round++) {
+    const Bytes n = noise(70000 + 9000 * round, 40 + round);
+    data.insert(data.end(), text.begin(), text.begin() + 120000 + 40000 * round);
+    data.insert(data.end(), n.begin(), n.end());
+    data.insert(data.end(), 30000, 0);
+    data.insert(data.end(), text.begin() + 5000, text.begin() + 90000);
+  }
+  for (int preset : {3, 6, 9}) {
+    for (size_t in_chunk : {size_t(777), size_t(1 << 16)}) {
+      gcomp_options_t * o = Opts("lzma2", {{"preset", preset}});
+      Bytes z, out, ref;
+      ASSERT_EQ(Encode("lzma2", data, z, in_chunk, 513, o), GCOMP_OK)
+          << "preset " << preset;
+      gcomp_options_destroy(o);
+      ASSERT_EQ(Decode("lzma2", z, out, z.size(), data.size() + 64), GCOMP_OK)
+          << "preset " << preset;
+      EXPECT_EQ(out, data) << "preset " << preset;
+      ASSERT_TRUE(lzmaref::raw_decode(lzmaref::kFilterLzma2, z,
+          lzmaref::options(preset), ref, data.size() + 64))
+          << "preset " << preset;
+      EXPECT_EQ(ref, data) << "preset " << preset;
+    }
+  }
+}
+
+/**
+ * A full flush forgets the dictionary: the next chunk resets it, so a match
+ * that reached back across the flush would name bytes the decoder no longer
+ * has. The same text on both sides of the flush is what tempts a match finder
+ * that still holds the old positions to use them.
+ */
+TEST_F(LzmaEncoderTest, NoMatchReachesBehindAFullFlush) {
+  const Bytes text = source(150000, 3);
+  for (int preset : {1, 3, 6}) {
+    gcomp_options_t * o = Opts("lzma2", {{"preset", preset}});
+    gcomp_encoder_t * enc = nullptr;
+    ASSERT_EQ(gcomp_encoder_create(registry_, "lzma2", o, &enc), GCOMP_OK);
+    gcomp_options_destroy(o);
+    Bytes z, buf(1 << 20);
+    for (int round = 0; round < 3; round++) {
+      gcomp_buffer_t ib = {text.data(), text.size(), 0};
+      gcomp_buffer_t ob = {buf.data(), buf.size(), 0};
+      ASSERT_EQ(gcomp_encoder_update(enc, &ib, &ob), GCOMP_OK);
+      ASSERT_EQ(gcomp_encoder_flush(enc, &ob, GCOMP_FLUSH_FULL), GCOMP_OK);
+      z.insert(z.end(), buf.begin(), buf.begin() + ob.used);
+    }
+    gcomp_buffer_t ob = {buf.data(), buf.size(), 0};
+    ASSERT_EQ(gcomp_encoder_finish(enc, &ob), GCOMP_OK);
+    z.insert(z.end(), buf.begin(), buf.begin() + ob.used);
+    gcomp_encoder_destroy(enc);
+    Bytes want, out;
+    for (int round = 0; round < 3; round++) {
+      want.insert(want.end(), text.begin(), text.end());
+    }
+    ASSERT_EQ(Decode("lzma2", z, out, z.size(), want.size() + 64), GCOMP_OK)
+        << "preset " << preset;
+    EXPECT_EQ(out, want) << "preset " << preset;
+    Bytes ref;
+    ASSERT_TRUE(lzmaref::raw_decode(lzmaref::kFilterLzma2, z,
+        lzmaref::options(preset), ref, want.size() + 64))
+        << "preset " << preset;
+    EXPECT_EQ(ref, want) << "preset " << preset;
+  }
+}
+
+/**
+ * A chunk that is stored throws away the model its symbols were planned with.
+ * Noise with a short repeat sprinkled in at a fixed distance gives the parser
+ * repeat symbols to plan, and is close enough to incompressible that some
+ * chunks are stored; where the output limit stops a chunk part way through a
+ * plan, what is left of the plan was made for repeat distances and a state
+ * that are gone. Several densities and seeds, every result read back.
+ */
+TEST_F(LzmaEncoderTest, APlanIsNotCarriedPastAStoredChunk) {
+  for (unsigned every : {25u, 40u, 60u, 100u}) {
+    for (uint32_t seed : {1u, 2u, 3u}) {
+      Bytes data = noise(200000, 700 + seed);
+      for (size_t i = 5000; i + 3 < data.size(); i += every) {
+        for (size_t k = 0; k < 3; k++) {
+          data[i + k] = data[i + k - 1000 - (seed % 7)];
+        }
+      }
+      for (int preset : {3, 6}) {
+        gcomp_options_t * o = Opts("lzma2", {{"preset", preset}});
+        Bytes z, out;
+        ASSERT_EQ(Encode("lzma2", data, z, 1 << 16, 1 << 16, o), GCOMP_OK);
+        gcomp_options_destroy(o);
+        ASSERT_EQ(Decode("lzma2", z, out, z.size(), data.size() + 64), GCOMP_OK)
+            << every << " " << seed << " preset " << preset;
+        ASSERT_EQ(out, data) << every << " " << seed << " preset " << preset;
+      }
+    }
+  }
+}
+
+/**
+ * The match finder's tree keeps a node per position in a ring as large as the
+ * dictionary rounded up to a power of two. A dictionary that is exactly a
+ * power of two leaves a candidate one whole ring behind in the slot of the
+ * position being entered, so the farthest distance has to be refused. Without
+ * that, a 64 KiB dictionary gave a stream both decoders read as other bytes.
+ * Dictionaries a little either side of the ring are the control.
+ */
+TEST_F(LzmaEncoderTest, ARepeatAtExactlyTheDictionarySizeDecodes) {
+  /* Text from a small vocabulary with line breaks, then noise: the shape on
+   * which the defect first showed, in the allocation-failure sweep. */
+  static const char * vocab[] = {"the", "quick", "brown", "fox", "jumps",
+      "over", "lazy", "dog", "compress", "allocation", "failure", "window"};
+  Bytes data;
+  uint32_t st = 12345u;
+  while (data.size() < 150 * 1024) {
+    st = st * 1103515245u + 12345u;
+    const char * w = vocab[(st >> 16) % 12];
+    data.insert(data.end(), w, w + std::strlen(w));
+    data.push_back(((st >> 8) & 7) ? ' ' : '\n');
+  }
+  data.resize(150 * 1024);
+  const Bytes rnd = noise(150 * 1024, 987654321u);
+  data.insert(data.end(), rnd.begin(), rnd.end());
+
+  for (uint64_t dict : {4096u, 65536u, 65535u, 65537u}) {
+    for (int preset : {3, 6, 9}) {
+      for (const char * method : {"lzma", "lzma2"}) {
+        gcomp_options_t * o =
+            Opts(method, {{"preset", preset}, {"dict_size", (int64_t)dict}});
+        Bytes z, out;
+        ASSERT_EQ(Encode(method, data, z, 1024, 1 << 12, o), GCOMP_OK);
+        gcomp_options_destroy(o);
+        ASSERT_EQ(Decode(method, z, out, z.size(), data.size() + 64), GCOMP_OK)
+            << method << " dict " << dict << " preset " << preset;
+        EXPECT_EQ(out, data)
+            << method << " dict " << dict << " preset " << preset;
+      }
+    }
   }
 }
 
