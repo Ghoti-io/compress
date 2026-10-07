@@ -366,6 +366,9 @@ tests/
 │   │   ├── test_brotli_encoder.cpp # Arguments, reset, back-pressure, skewed alphabets
 │   │   ├── test_brotli_register.cpp # peek across every window; table bounds
 │   │   └── test_brotli_robustness.cpp # Hand-built streams, corruption sweep
+│   ├── lzma/                     # LZMA and LZMA2 method tests
+│   │   ├── lzma_oracle.h         # liblzma loaded at run time, as the reference
+│   │   └── test_lzma_decoder.cpp # Against liblzma, byte-at-a-time, malformed chunks
 │   ├── deflate/                  # Deflate method tests
 │   │   ├── test_deflate_bitio.cpp
 │   │   ├── test_deflate_decoder.cpp
