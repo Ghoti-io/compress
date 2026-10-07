@@ -624,7 +624,9 @@ static gcomp_status_t drive(bz_dec_t * d, const uint8_t ** in,
       {
         uint8_t pos[BZIP2_MAX_GROUPS];
         unsigned i, v;
-        for (i = 0; i < d->n_groups; i++) {
+        /* All of them: GCC at -O3 under TSan cannot see n_groups is at most
+         * six and takes the loop for an overflow. */
+        for (i = 0; i < BZIP2_MAX_GROUPS; i++) {
           pos[i] = (uint8_t)i;
         }
         for (i = 0; i < d->n_selectors; i++) {

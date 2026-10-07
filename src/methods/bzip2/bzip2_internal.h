@@ -68,9 +68,9 @@ static inline uint32_t bzip2_combine(uint32_t combined, uint32_t block_crc) {
   return ((combined << 1) | (combined >> 31)) ^ block_crc;
 }
 
-/** Scratch for the transform: 2n + 1 symbols of text and of suffix array. */
+/** Scratch for the transform: 2n + 1 symbols of text (16-bit) and of suffix array (32-bit). */
 typedef struct bzip2_bwt_scratch_s {
-  int32_t * s;
+  uint16_t * s;
   int32_t * sa;
 } bzip2_bwt_scratch_t;
 

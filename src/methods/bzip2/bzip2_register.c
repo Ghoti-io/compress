@@ -55,7 +55,7 @@ static const gcomp_option_schema_t g_bzip2_option_schemas[] = {
         0,
         0,
         "Block size in hundreds of thousands of bytes, 1..9. The encoder holds "
-        "about 21 times a block while it sorts one.",
+        "about 38 times a block per job while it sorts one.",
         NULL,
     },
     {
@@ -100,6 +100,22 @@ static const gcomp_option_schema_t g_bzip2_option_schemas[] = {
         "Maximum output/input ratio; default is this format's own ceiling",
         NULL,
     },
+    {
+        "threads.count",
+        GCOMP_OPT_UINT64,
+        1,
+        {.ui64 = 1},
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        "Worker threads that code blocks in parallel (0 or 1: on the calling "
+        "thread). The output does not depend on it. Each thread holds about 38 "
+        "times a block while it works.",
+        NULL,
+    },
 };
 
 /* One entry per g_bzip2_option_schemas entry, in the same order: see the note
@@ -109,6 +125,7 @@ static const char * const g_bzip2_option_keys[] = {
     "limits.max_output_bytes",
     "limits.max_memory_bytes",
     "limits.max_expansion_ratio",
+    "threads.count",
 };
 
 static const gcomp_method_schema_t g_bzip2_schema = {

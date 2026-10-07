@@ -31,6 +31,7 @@
 #include <ghoti.io/compress/stream.h>
 #include <gtest/gtest.h>
 #include <set>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -99,6 +100,12 @@ protected:
     gcomp_options_t * o = nullptr;
     EXPECT_EQ(gcomp_options_create(&o), GCOMP_OK);
     EXPECT_EQ(gcomp_options_set_int64(o, "bzip2.level", level), GCOMP_OK);
+    return o;
+  }
+
+  gcomp_options_t * LevelAndThreads(int64_t level, uint64_t threads) {
+    gcomp_options_t * o = Level(level);
+    EXPECT_EQ(gcomp_options_set_uint64(o, "threads.count", threads), GCOMP_OK);
     return o;
   }
 
@@ -509,6 +516,187 @@ TEST_F(Bzip2EncoderTest, ResetEqualsAFreshEncoder) {
   ASSERT_EQ(gcomp_encoder_finish(enc, &ob), GCOMP_OK);
   EXPECT_EQ(Bytes(buf.begin(), buf.begin() + ob.used), fresh);
   gcomp_encoder_destroy(enc);
+}
+
+/**
+ * The number of threads is not in the output: a block's bits are a function of
+ * the block, and the caller's thread splices them in order. Many blocks at
+ * level 1, so that several are in flight at once and finish out of order, fed
+ * in pieces of awkward sizes and drained through buffers from one byte up, so
+ * that the encoder is made to stop and resume at every place it can: with a
+ * block waiting to be handed on, with the stage full, and with every job out.
+ */
+TEST_F(Bzip2EncoderTest, TheOutputDoesNotDependOnTheNumberOfThreads) {
+  const Bytes data = mixed(1200000);
+  gcomp_options_t * base = Level(1);
+  Bytes want;
+  ASSERT_EQ(Encode(data, want, data.size(), 1 << 16, base), GCOMP_OK);
+  gcomp_options_destroy(base);
+  for (uint64_t threads : {0u, 1u, 2u, 3u, 8u}) {
+    for (size_t in_chunk : {size_t(1), size_t(777), size_t(100000), data.size()}) {
+      if (in_chunk == 1 && threads != 0 && threads != 3) {
+        continue; /* a byte at a time is slow: two shapes of it are enough */
+      }
+      for (size_t out_chunk : {size_t(1), size_t(4093), size_t(1 << 16)}) {
+        if (in_chunk == 1 && out_chunk == 1) {
+          continue;
+        }
+        gcomp_options_t * o = LevelAndThreads(1, threads);
+        Bytes got;
+        ASSERT_EQ(Encode(data, got, in_chunk, out_chunk, o), GCOMP_OK)
+            << threads << " threads, in " << in_chunk << ", out " << out_chunk;
+        gcomp_options_destroy(o);
+        ASSERT_EQ(got, want)
+            << threads << " threads, in " << in_chunk << ", out " << out_chunk;
+      }
+    }
+  }
+  Bytes ref;
+  ASSERT_TRUE(bzref::decompress(want, ref, data.size() + 64));
+  EXPECT_EQ(ref, data);
+}
+
+/// A flush with jobs out ends the stream after every one of them has landed,
+/// in order; the encoder then starts a fresh stream, and a reset with jobs out
+/// abandons them without losing the pool.
+TEST_F(Bzip2EncoderTest, FlushAndResetWorkWithBlocksInFlight) {
+  const Bytes data = mixed(700000);
+  gcomp_options_t * o = LevelAndThreads(1, 4);
+  gcomp_encoder_t * enc = nullptr;
+  ASSERT_EQ(gcomp_encoder_create(registry_, "bzip2", o, &enc), GCOMP_OK);
+  gcomp_options_destroy(o);
+  Bytes z, buf(1 << 20);
+  size_t fed = 0, seam = 0;
+  for (size_t piece : {350000u, 100u, 349900u}) {
+    gcomp_buffer_t ib = {data.data() + fed, piece, 0};
+    while (ib.used < ib.size) {
+      gcomp_buffer_t ob = {buf.data(), 1000, 0};
+      ASSERT_EQ(gcomp_encoder_update(enc, &ib, &ob), GCOMP_OK);
+      z.insert(z.end(), buf.begin(), buf.begin() + ob.used);
+    }
+    for (;;) {
+      gcomp_buffer_t ob = {buf.data(), 1000, 0};
+      gcomp_status_t s = gcomp_encoder_flush(enc, &ob, GCOMP_FLUSH_SYNC);
+      z.insert(z.end(), buf.begin(), buf.begin() + ob.used);
+      if (s == GCOMP_OK) {
+        break;
+      }
+      ASSERT_EQ(s, GCOMP_ERR_LIMIT);
+    }
+    /* Each flush ended a stream: libbz2 reads the newest one by itself (it
+     * stops at the end of a stream, so it is given only that one), and this
+     * library's decoder reads all of them as one. */
+    Bytes seg(z.begin() + seam, z.end()), ref, all;
+    ASSERT_TRUE(bzref::decompress(seg, ref, piece + 64)) << "after " << fed + piece;
+    EXPECT_EQ(ref, Bytes(data.begin() + fed, data.begin() + fed + piece));
+    seam = z.size();
+    fed += piece;
+    ASSERT_EQ(Decode(z, all, 4096, fed + 64), GCOMP_OK) << "after " << fed;
+    EXPECT_EQ(all, Bytes(data.begin(), data.begin() + fed)) << "after " << fed;
+  }
+  /* Abandon a stream with blocks out, then use the encoder again. */
+  gcomp_buffer_t ib = {data.data(), data.size(), 0};
+  gcomp_buffer_t ob = {buf.data(), 10, 0};
+  ASSERT_EQ(gcomp_encoder_update(enc, &ib, &ob), GCOMP_OK);
+  ASSERT_EQ(gcomp_encoder_reset(enc), GCOMP_OK);
+  const Bytes small = words(250000, 5);
+  ib = {small.data(), small.size(), 0};
+  ob = {buf.data(), buf.size(), 0};
+  ASSERT_EQ(gcomp_encoder_update(enc, &ib, &ob), GCOMP_OK);
+  ASSERT_EQ(gcomp_encoder_finish(enc, &ob), GCOMP_OK);
+  Bytes fresh;
+  gcomp_options_t * one = Level(1);
+  ASSERT_EQ(Encode(small, fresh, small.size(), 1 << 16, one), GCOMP_OK);
+  gcomp_options_destroy(one);
+  EXPECT_EQ(Bytes(buf.begin(), buf.begin() + ob.used), fresh);
+  gcomp_encoder_destroy(enc);
+}
+
+/// Destroying an encoder with blocks out neither hangs nor leaks (the
+/// sanitizer builds check the second), and a memory budget that will not
+/// stretch to the threads asked for gives fewer, not an error.
+TEST_F(Bzip2EncoderTest, DestroyWithBlocksOutAndAMemoryBudgetThatCapsThreads) {
+  const Bytes data = mixed(900000);
+  for (int round = 0; round < 3; round++) {
+    gcomp_options_t * o = LevelAndThreads(1, 6);
+    if (round == 2) {
+      /* Room for one job and no more: the threads asked for cannot run. */
+      EXPECT_EQ(gcomp_options_set_uint64(o, "limits.max_memory_bytes", 5u << 20),
+          GCOMP_OK);
+    }
+    gcomp_encoder_t * enc = nullptr;
+    ASSERT_EQ(gcomp_encoder_create(registry_, "bzip2", o, &enc), GCOMP_OK);
+    gcomp_options_destroy(o);
+    Bytes buf(1 << 20);
+    gcomp_buffer_t ib = {data.data(), data.size(), 0};
+    gcomp_buffer_t ob = {buf.data(), buf.size(), 0};
+    ASSERT_EQ(gcomp_encoder_update(enc, &ib, &ob), GCOMP_OK);
+    if (round == 1) {
+      ASSERT_EQ(gcomp_encoder_finish(enc, &ob), GCOMP_OK);
+      Bytes ref;
+      ASSERT_TRUE(bzref::decompress(
+          Bytes(buf.begin(), buf.begin() + ob.used), ref, data.size() + 64));
+      EXPECT_EQ(ref, data);
+    }
+    gcomp_encoder_destroy(enc);
+  }
+}
+
+/**
+ * The sort's scratch comes from an arena of fixed size, so what it can need
+ * has to be bounded for every input, and the inputs that make it recurse
+ * deepest are the self-similar ones: the Fibonacci word, the Thue-Morse
+ * sequence, short periods, and a long run broken once. Each is a whole block
+ * at level 9, coded on a worker, and has to come out and decode; an arena that
+ * ran dry would surface as a memory error from the encoder.
+ */
+TEST_F(Bzip2EncoderTest, SelfSimilarBlocksFitTheArenaTheSortIsGiven) {
+  const size_t n = 880000;
+  std::vector<std::pair<const char *, Bytes>> cases;
+  {
+    Bytes a = {'a'}, b = {'a', 'b'};
+    while (b.size() < n) {
+      Bytes c = b;
+      c.insert(c.end(), a.begin(), a.end());
+      a = b;
+      b = c;
+    }
+    b.resize(n);
+    cases.emplace_back("fibonacci", b);
+  }
+  {
+    Bytes t(n);
+    for (size_t i = 0; i < n; i++) {
+      t[i] = (uint8_t)('a' + (__builtin_popcountll(i) & 1));
+    }
+    cases.emplace_back("thue-morse", t);
+  }
+  for (size_t period : {size_t(1), size_t(2), size_t(3), size_t(7)}) {
+    Bytes t(n);
+    for (size_t i = 0; i < n; i++) {
+      t[i] = (uint8_t)('a' + (i % period) * 3 % 5);
+    }
+    cases.emplace_back("periodic", t);
+  }
+  {
+    Bytes t(n, 'q');
+    t[n / 2] = 'r';
+    cases.emplace_back("one break in a run", t);
+  }
+  for (const auto & c : cases) {
+    for (uint64_t threads : {1u, 2u}) {
+      gcomp_options_t * o = LevelAndThreads(9, threads);
+      Bytes z, back;
+      ASSERT_EQ(Encode(c.second, z, c.second.size(), 1 << 16, o), GCOMP_OK)
+          << c.first << ", " << threads << " threads";
+      gcomp_options_destroy(o);
+      ASSERT_EQ(Decode(z, back, 1 << 16, 1 << 16), GCOMP_OK) << c.first;
+      EXPECT_EQ(back, c.second) << c.first;
+      Bytes ref;
+      ASSERT_TRUE(bzref::decompress(z, ref, c.second.size() + 64)) << c.first;
+      EXPECT_EQ(ref, c.second) << c.first;
+    }
+  }
 }
 
 TEST_F(Bzip2EncoderTest, UpdateAndFlushAfterFinishAreRefused) {

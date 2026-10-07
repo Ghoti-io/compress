@@ -98,7 +98,8 @@ public:
   }
 
 private:
-  std::vector<int32_t> s_, sa_;
+  std::vector<uint16_t> s_;
+  std::vector<int32_t> sa_;
   bzip2_bwt_scratch_t scratch_;
 };
 
