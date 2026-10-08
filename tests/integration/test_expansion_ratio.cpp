@@ -56,6 +56,7 @@
 #include <ghoti.io/compress/method.h>
 #include <ghoti.io/compress/rle.h>
 #include <ghoti.io/compress/zlib.h>
+#include <ghoti.io/compress/xz.h>
 #include <ghoti.io/compress/zstd.h>
 #include <ghoti.io/compress/errors.h>
 #include <ghoti.io/compress/limits.h>
@@ -445,6 +446,7 @@ const MethodCase k_methods[] = {
     {"brotli", "brotli.level", 1, GCOMP_BROTLI_MAX_EXPANSION_RATIO},
     {"lzma2", "lzma2.preset", 3, GCOMP_LZMA_MAX_EXPANSION_RATIO},
     {"bzip2", "bzip2.level", 9, GCOMP_BZIP2_MAX_EXPANSION_RATIO},
+    {"xz", "xz.preset", 3, GCOMP_XZ_MAX_EXPANSION_RATIO},
 };
 
 /**

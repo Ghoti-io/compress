@@ -362,6 +362,17 @@ jobs:
           make -j"$(nproc)" PREFIX="$PREFIX"
           make install PREFIX="$PREFIX"
 
+      - uses: actions/checkout@v4
+        with:
+          repository: Ghoti-io/security
+          path: security
+
+      - name: Build and install security
+        working-directory: security
+        run: |
+          make -j"$(nproc)" PREFIX="$PREFIX"
+          make install PREFIX="$PREFIX"
+
       - name: Build
         working-directory: compress
         run: make -j"$(nproc)" PREFIX="$PREFIX"

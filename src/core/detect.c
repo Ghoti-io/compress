@@ -25,7 +25,7 @@
  *
  * ## What can and cannot be detected
  *
- * Three of the seven formats begin with a magic number, and those three can be
+ * Five of the formats begin with a magic number, and those five can be
  * told apart from each other and from anything else with near certainty:
  *
  * | format | bytes | from |
@@ -34,6 +34,7 @@
  * | zstd | `28 b5 2f fd` | RFC 8878 section 3.1.1, Magic_Number 0xFD2FB528 |
  * | lz4 | `04 22 4d 18` | LZ4 Frame Format, Magic Number 0x184D2204 |
  * | bzip2 | `42 5a 68 31`..`39` | "BZh" and a level digit, which libbz2's format opens with |
+ * | xz | `fd 37 7a 58 5a 00` | the xz file format, section 2.1.1.1, the stream header magic |
  *
  * zlib has no magic number.  RFC 1950 section 2.2 gives it two header bytes
  * with enough structure to test: the compression method must be 8 (one byte
@@ -178,6 +179,23 @@ gcomp_status_t gcomp_detect(const void * input, size_t input_size,
         p[offset + 3] >= '1' && p[offset + 3] <= '9') {
       *method_name_out = "bzip2";
       return GCOMP_OK;
+    }
+    // xz: FD 37 7A 58 5A 00, six bytes, the sixth of which is zero. Four
+    // bytes of it are enough to say it is probably xz and not to say it is,
+    // so the answer waits for the other two rather than claiming a file that
+    // merely begins "\xFD7zX".
+    if (p[offset] == 0xFDu && p[offset + 1] == '7' && p[offset + 2] == 'z' &&
+        p[offset + 3] == 'X') {
+      if (avail < 6u) {
+        if (needed_out) {
+          *needed_out = offset + 6u;
+        }
+        return GCOMP_ERR_LIMIT;
+      }
+      if (p[offset + 4] == 'Z' && p[offset + 5] == 0x00u) {
+        *method_name_out = "xz";
+        return GCOMP_OK;
+      }
     }
     // Last, and a guess: see the note at the top of this file.
     if (detect_looks_like_zlib(p + offset)) {

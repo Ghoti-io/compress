@@ -49,6 +49,7 @@
 #include <ghoti.io/compress/rle.h>
 #include <ghoti.io/compress/stream.h>
 #include <ghoti.io/compress/zlib.h>
+#include <ghoti.io/compress/xz.h>
 #include <ghoti.io/compress/zstd.h>
 #include <gtest/gtest.h>
 
@@ -192,6 +193,9 @@ gcomp_status_t register_all(gcomp_registry_t * reg) {
     return s;
   }
   if ((s = gcomp_method_delta_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_xz_register(reg)) != GCOMP_OK) {
     return s;
   }
   if ((s = gcomp_method_bcj_register(reg)) != GCOMP_OK) {
@@ -894,6 +898,39 @@ void add_scenarios(std::vector<Scenario> & out) {
   out.push_back({"bzip2/empty", "bzip2", bz_level(1), empty,
       Mode::StreamingTiny, true});
 
+  // xz makes a chain of lzma2 and its filters, so it allocates through four
+  // methods and the container's own index; a failure in any of them has to come
+  // back as an error, whatever block it falls in.
+  auto xz_opts = [](const char * check, const char * filters, int64_t block) {
+    return [=](gcomp_options_t * o) {
+      gcomp_options_set_string(o, "xz.check", check);
+      gcomp_options_set_int64(o, "xz.preset", 0);
+      gcomp_options_set_uint64(o, "xz.dict_size", 65536);
+      if (filters[0]) {
+        gcomp_options_set_string(o, "xz.filters", filters);
+      }
+      if (block) {
+        gcomp_options_set_uint64(o, "xz.block_size", (uint64_t)block);
+      }
+    };
+  };
+  out.push_back({"xz/text", "xz", xz_opts("crc64", "", 0), text,
+      Mode::StreamingTiny, true});
+  out.push_back({"xz/random", "xz", xz_opts("sha256", "", 0), rnd,
+      Mode::StreamingTiny, false});
+  out.push_back({"xz/blocks", "xz", xz_opts("crc32", "", 40000), brotli_long,
+      Mode::StreamingTiny, false});
+  out.push_back({"xz/filters", "xz", xz_opts("crc64", "x86,delta:2", 50000),
+      mixed, Mode::StreamingTiny, false});
+  out.push_back({"xz/flush", "xz", xz_opts("none", "", 0), text,
+      Mode::StreamingFlush, false});
+  out.push_back({"xz/buffer", "xz", xz_opts("crc64", "arm64", 0), mixed,
+      Mode::Buffer, false});
+  out.push_back({"xz/reset", "xz", xz_opts("crc64", "delta", 0), text,
+      Mode::ResetReuse, false});
+  out.push_back({"xz/empty", "xz", xz_opts("crc64", "", 0), empty,
+      Mode::StreamingTiny, true});
+
   // delta and bcj allocate their state and nothing else, so one allocation
   // each; the grid is here to see that a failure of that one is reported and
   // that nothing is left behind.
@@ -967,6 +1004,9 @@ TEST(AllocFailure, Lzma2) {
 }
 TEST(AllocFailure, Bzip2) {
   sweep_method("bzip2");
+}
+TEST(AllocFailure, Xz) {
+  sweep_method("xz");
 }
 TEST(AllocFailure, Delta) {
   sweep_method("delta");

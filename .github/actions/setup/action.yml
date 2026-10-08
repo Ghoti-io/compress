@@ -1,9 +1,9 @@
 # The part of every job that is the same in every job.
 #
-# This library resolves its one dependency through pkg-config and nothing
+# This library resolves its dependencies through pkg-config and nothing
 # else - there is deliberately no sibling-checkout fallback, because a second
 # resolution path that only in-tree builds exercise is one that silently rots
-# (CONVENTIONS.md section 1). So cutil is built and installed into a prefix
+# (CONVENTIONS.md section 1). So cutil and security are built and installed into a prefix
 # inside the workspace first, exactly the way ../bootstrap.sh does it locally,
 # and every job then builds against that prefix the way a consumer would.
 #
@@ -13,7 +13,7 @@
 # oracle test and an absent one look identical in the summary line, and a CI
 # that quietly compared our output against nothing would still be green.
 name: Set up the build
-description: Install the toolchain and dependencies, and build cutil into the workspace prefix.
+description: Install the toolchain and dependencies, and build cutil and security into the workspace prefix.
 
 inputs:
   packages:
@@ -45,6 +45,21 @@ runs:
     - name: Build and install cutil
       shell: bash
       working-directory: cutil
+      run: |
+        make -j"$(nproc)" PREFIX="$PREFIX"
+        make install PREFIX="$PREFIX"
+
+    # security is what supplies SHA-256 for xz's check. It depends on cutil
+    # only, which is why it comes second.
+    - name: Check out security
+      uses: actions/checkout@v4
+      with:
+        repository: Ghoti-io/security
+        path: security
+
+    - name: Build and install security
+      shell: bash
+      working-directory: security
       run: |
         make -j"$(nproc)" PREFIX="$PREFIX"
         make install PREFIX="$PREFIX"

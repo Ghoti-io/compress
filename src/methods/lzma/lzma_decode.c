@@ -891,6 +891,15 @@ gcomp_status_t lzma_decoder_reset(gcomp_decoder_t * decoder) {
   return GCOMP_OK;
 }
 
+int lzma_decoder_done(const gcomp_decoder_t * decoder) {
+  const lzma_decoder_t * st;
+  if (!decoder || !decoder->method_state) {
+    return 0;
+  }
+  st = decoder->method_state;
+  return !st->failed && st->phase == PH_DONE;
+}
+
 /* Run the core over what this phase's input is, then settle the accounting. */
 static gcomp_status_t dec_run_core(lzma_decoder_t * st, const uint8_t ** in,
     const uint8_t * in_end, gcomp_buffer_t * output, uint64_t produce_max,

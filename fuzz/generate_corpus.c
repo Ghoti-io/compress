@@ -599,6 +599,7 @@ int main(void) {
         {"lzma", "lzma_"},
         {"lzma2", "lzma2_"},
         {"bzip2", "bzip2_"},
+        {"xz", "xz_"},
     };
 
     gcomp_registry_t * registry = gcomp_registry_default();

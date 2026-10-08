@@ -26,6 +26,7 @@ libc.
 | `"lz4"` | `threads.count` encodes blocks in parallel. That output is byte-identical to the single-threaded stream. |
 | `"brotli"` | RFC 7932. Level 1 (the default) writes LZ77 and Huffman; level 0 stores uncompressed meta-blocks. The decoder reads the format. |
 | `"bzip2"` | Streams of Burrows-Wheeler blocks, as `bzip2` and libbz2 write them. The encoder sorts with SA-IS and is within a few bytes of libbz2's size; a flush ends the stream. |
+| `"xz"` | The xz container: streams of blocks, each a chain of filters ending in LZMA2, with a CRC-32, CRC-64 or SHA-256 check and an index. Read and written as `xz` and liblzma do, including several blocks, several streams and the filters above. |
 | `"delta"`, `"bcj"` | Filters, not compressors: a byte-wise difference, and the branch converters for x86, PowerPC, IA-64, ARM, ARM Thumb, SPARC and ARM64. Same size in and out, no header, exact in both directions, and xz's own, so an xz stream carries them. |
 | `"lzma"`, `"lzma2"` | LZMA-alone (`.lzma`, or raw with `lzma.raw`) and the LZMA2 chunk framing. The encoder is a fast-mode parser, within a few percent of liblzma at presets 0 to 3. |
 | `"lzw"`, `"rle"` | The same registry, the same buffer rule. |
@@ -84,9 +85,10 @@ installs `ghoti.io-compress-dev` instead.
 
 ## Building the library
 
-[cutil](https://github.com/Ghoti-io/cutil) must already be installed where
-pkg-config can see it. A dependency it cannot find is a hard error naming
-the fix. No other library implements a method.
+[cutil](https://github.com/Ghoti-io/cutil) and
+[security](https://github.com/Ghoti-io/security) must already be installed
+where pkg-config can see them. A dependency it cannot find is a hard error
+naming the fix. No other library implements a method.
 
 ```bash
 make
@@ -138,6 +140,7 @@ Found through pkg-config, and the installed `.pc` file names it, so a
 program that links `ghoti.io-compress-0` links this too.
 
 - [ghoti.io-cutil](https://github.com/Ghoti-io/cutil) — the allocator, the thread pool and the sequencer that parallel compression is built on.
+- [ghoti.io-security](https://github.com/Ghoti-io/security) — SHA-256, for the check an xz stream can carry.
 
 ## Documentation
 

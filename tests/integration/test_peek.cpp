@@ -465,7 +465,7 @@ TEST(Peek, AgreesWithTheDecoder) {
     const std::vector<uint8_t> input = sample_input(n);
     for (const char * method :
         {"deflate", "zlib", "gzip", "lz4", "zstd", "lzw", "rle", "brotli",
-            "bzip2"}) {
+            "bzip2", "xz"}) {
       std::vector<uint8_t> stream = encode_with(method, nullptr, input);
       if (stream.empty()) {
         continue;

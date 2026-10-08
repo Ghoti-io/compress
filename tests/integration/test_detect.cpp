@@ -70,7 +70,7 @@ std::vector<uint8_t> skippable_frame(uint8_t variant, size_t payload) {
 
 TEST(Detect, RecognisesOurOwnStreams) {
   const std::vector<uint8_t> input = sample_input();
-  for (const char * method : {"gzip", "zstd", "lz4", "zlib", "bzip2"}) {
+  for (const char * method : {"gzip", "zstd", "lz4", "zlib", "bzip2", "xz"}) {
     std::vector<uint8_t> stream = encode_with(method, input);
     const char * name = nullptr;
     size_t needed = 0;
@@ -85,7 +85,7 @@ TEST(Detect, RecognisesOurOwnStreams) {
 /// And what it detects must then actually decode, which is the point of it.
 TEST(Detect, DetectedMethodDecodes) {
   const std::vector<uint8_t> input = sample_input();
-  for (const char * method : {"gzip", "zstd", "lz4", "zlib", "bzip2"}) {
+  for (const char * method : {"gzip", "zstd", "lz4", "zlib", "bzip2", "xz"}) {
     std::vector<uint8_t> stream = encode_with(method, input);
     const char * name = nullptr;
     ASSERT_EQ(gcomp_detect(stream.data(), stream.size(), &name, nullptr),

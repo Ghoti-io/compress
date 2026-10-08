@@ -658,7 +658,7 @@ TEST(OptionValidationTest, ZeroIsAcceptedForTheLimitsThatMeanUnlimited) {
   // value before the method ever sees it.  lz4 and zstd both declared one.
   for (const char * method :
       {"lz4", "zstd", "lzw", "rle", "deflate", "gzip", "brotli", "lzma",
-          "lzma2", "bzip2"}) {
+          "lzma2", "bzip2", "xz"}) {
     EXPECT_EQ(createEncoderWith(method, setZeroOutputAndRatio), GCOMP_OK)
         << method << ": zero output/ratio limits must be accepted";
     EXPECT_EQ(createDecoderWith(method, setZeroOutputAndRatio), GCOMP_OK)

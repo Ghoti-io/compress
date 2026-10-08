@@ -160,6 +160,13 @@ gcomp_status_t lzma_decoder_finish(
     gcomp_decoder_t * decoder, gcomp_buffer_t * output);
 gcomp_status_t lzma_decoder_reset(gcomp_decoder_t * decoder);
 
+/** Whether an LZMA2 decoder has read its end marker, which xz needs in order
+ * to know where a block's data stops. */
+int lzma_decoder_done(const gcomp_decoder_t * decoder);
+
+/** The dictionary an encoder was configured with, in bytes. */
+uint32_t lzma_encoder_dict_size(const gcomp_encoder_t * encoder);
+
 #ifdef __cplusplus
 }
 #endif

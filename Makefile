@@ -386,7 +386,20 @@ ifndef SKIP_DEP_CHECK
 $(error ghoti.io-cutil was not found by pkg-config. Run ./bootstrap.sh in the parent folder to build and install the suite into a local prefix, then pass the same PREFIX here - or point PKG_CONFIG_PATH at the directory holding its .pc file. There is deliberately no sibling-checkout fallback: a second resolution path that only in-tree builds exercise is one that silently rots.)
 endif
 endif
-LDFLAGS := -L /usr/lib -lstdc++ -lm $(CUTIL_LIBS) -lpthread $(EXTRA_LDFLAGS)
+# security, found the same way, for the SHA-256 check an xz stream may carry.
+# Its own library with its own tests, so that this one does not carry a second,
+# less examined SHA-256; and a hard dependency rather than an optional one, so
+# that there is one build and one set of behaviours to describe. Like cutil's
+# above, with no sibling-checkout fallback.
+SECURITY_PC ?= ghoti.io-security$(BRANCH)
+SECURITY_CFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cflags $(SECURITY_PC) 2>/dev/null)
+SECURITY_LIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs $(SECURITY_PC) 2>/dev/null)
+ifeq ($(strip $(SECURITY_CFLAGS)),)
+ifndef SKIP_DEP_CHECK
+$(error ghoti.io-security was not found by pkg-config. Run ./bootstrap.sh in the parent folder to build and install the suite into a local prefix, then pass the same PREFIX here - or point PKG_CONFIG_PATH at the directory holding its .pc file. There is deliberately no sibling-checkout fallback, for the reason cutil's error above gives.)
+endif
+endif
+LDFLAGS := -L /usr/lib -lstdc++ -lm $(CUTIL_LIBS) $(SECURITY_LIBS) -lpthread $(EXTRA_LDFLAGS)
 ifdef PREFIX
 # So that a library, a test or an example finds its Ghoti.io dependencies in the
 # prefix at run time without LD_LIBRARY_PATH.
@@ -430,7 +443,7 @@ endif
 
 # The standard include directories for the project.
 # Include cutil headers for threading support (via pkg-config)
-INCLUDE := -I include/ -I $(GEN_DIR)/ $(CUTIL_CFLAGS)
+INCLUDE := -I include/ -I $(GEN_DIR)/ $(CUTIL_CFLAGS) $(SECURITY_CFLAGS)
 
 # Additional include directories for tests (common helpers, method-specific data)
 TEST_INCLUDE := $(INCLUDE) -I src/ -I tests/common/ -I tests/methods/deflate/
@@ -825,7 +838,7 @@ $(APP_DIR)/fuzz/generate_corpus$(EXE_EXTENSION): fuzz/generate_corpus.c \
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(INCLUDE) -o $@ $< \
 		-Wl,--whole-archive $(APP_DIR)/$(STATIC_TARGET) -Wl,--no-whole-archive \
-		$(CUTIL_LIBS) -lm -lpthread -Wl,-rpath,$(PREFIX)/lib/$(SUITE)
+		$(CUTIL_LIBS) $(SECURITY_LIBS) -lm -lpthread -Wl,-rpath,$(PREFIX)/lib/$(SUITE)
 
 # Pattern rule for fuzz executables (linked against AFL-instrumented library)
 #
@@ -846,7 +859,7 @@ $(APP_DIR)/fuzz/%$(EXE_EXTENSION): fuzz/%.c $(APP_DIR)/$(AFL_STATIC_TARGET)
 	$(AFL_CC) $(AFL_CFLAGS) $(AFL_LDFLAGS) -o $@ $< \
 		-MMD -MP -MF $(@:$(EXE_EXTENSION)=.d) \
 		-Wl,--whole-archive $(APP_DIR)/$(AFL_STATIC_TARGET) -Wl,--no-whole-archive \
-		$(CUTIL_LIBS) -lm -lpthread
+		$(CUTIL_LIBS) $(SECURITY_LIBS) -lm -lpthread
 
 # Same reason as the objects above: a harness includes the public headers.
 FUZZ_DEPFILES := $(patsubst fuzz/%.c,$(APP_DIR)/fuzz/%.d,$(FUZZ_SOURCES))
@@ -874,6 +887,7 @@ FUZZ_DEPFILES := $(patsubst fuzz/%.c,$(APP_DIR)/fuzz/%.d,$(FUZZ_SOURCES))
 .PHONY: fuzz-lzma-decoder fuzz-lzma-encoder fuzz-lzma-roundtrip
 .PHONY: fuzz-bzip2-decoder fuzz-bzip2-encoder fuzz-bzip2-roundtrip
 .PHONY: fuzz-filters-roundtrip
+.PHONY: fuzz-xz-decoder fuzz-xz-encoder fuzz-xz-roundtrip
 .PHONY: fuzz-lzma2-decoder fuzz-lzma2-encoder fuzz-lzma2-roundtrip
 # Sanitizer commands
 .PHONY: test-asan test-asan-quiet test-ubsan sanitizer-help
@@ -1025,6 +1039,7 @@ fuzz-help: ## Show fuzzing help and instructions
 	@printf "    make fuzz-lzma-decoder    - Run LZMA decoder fuzzer (also -encoder, -roundtrip, and fuzz-lzma2-*)\n"
 	@printf "    make fuzz-bzip2-decoder   - Run bzip2 decoder fuzzer (also -encoder, -roundtrip)\n"
 	@printf "    make fuzz-filters-roundtrip - Run the delta and bcj filter fuzzer\n"
+	@printf "    make fuzz-xz-decoder      - Run xz decoder fuzzer (also -encoder, -roundtrip)\n"
 	@printf "\n"
 	@printf "Workflow:\n"
 	@printf "  1. make fuzz-corpus        # Generate seed inputs\n"
@@ -1564,6 +1579,51 @@ fuzz-bzip2-roundtrip: $(APP_DIR)/fuzz/fuzz_bzip2_roundtrip$(EXE_EXTENSION)
 	fi
 	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/bzip2_roundtrip -o fuzz/findings/bzip2_roundtrip -- $(APP_DIR)/fuzz/fuzz_bzip2_roundtrip$(EXE_EXTENSION)
 
+fuzz-xz-decoder: ## Run xz decoder fuzzer (Ctrl+C to stop)
+fuzz-xz-decoder: $(APP_DIR)/fuzz/fuzz_xz_decoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running xz Decoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/xz_decoder
+	@if [ ! -d fuzz/corpus/xz_decoder ] || [ -z "$$(ls -A fuzz/corpus/xz_decoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/xz_decoder; \
+		printf '\xfd7zXZ\x00' > fuzz/corpus/xz_decoder/empty.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/xz_decoder -o fuzz/findings/xz_decoder -- $(APP_DIR)/fuzz/fuzz_xz_decoder$(EXE_EXTENSION)
+
+fuzz-xz-encoder: ## Run xz encoder fuzzer (Ctrl+C to stop)
+fuzz-xz-encoder: $(APP_DIR)/fuzz/fuzz_xz_encoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running xz Encoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/xz_encoder
+	@if [ ! -d fuzz/corpus/xz_encoder ] || [ -z "$$(ls -A fuzz/corpus/xz_encoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/xz_encoder; \
+		printf 'Hello' > fuzz/corpus/xz_encoder/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/xz_encoder -o fuzz/findings/xz_encoder -- $(APP_DIR)/fuzz/fuzz_xz_encoder$(EXE_EXTENSION)
+
+fuzz-xz-roundtrip: ## Run xz roundtrip fuzzer (Ctrl+C to stop)
+fuzz-xz-roundtrip: $(APP_DIR)/fuzz/fuzz_xz_roundtrip$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running xz Roundtrip Fuzzer   ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/xz_roundtrip
+	@if [ ! -d fuzz/corpus/xz_roundtrip ] || [ -z "$$(ls -A fuzz/corpus/xz_roundtrip 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/xz_roundtrip; \
+		printf 'Hello' > fuzz/corpus/xz_roundtrip/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/xz_roundtrip -o fuzz/findings/xz_roundtrip -- $(APP_DIR)/fuzz/fuzz_xz_roundtrip$(EXE_EXTENSION)
+
 fuzz-filters-roundtrip: ## Run delta and bcj filter roundtrip fuzzer (Ctrl+C to stop)
 fuzz-filters-roundtrip: $(APP_DIR)/fuzz/fuzz_filters_roundtrip$(EXE_EXTENSION)
 	@printf "\033[0;32m\n"
@@ -1857,6 +1917,18 @@ check-clean-guard: ## Fail if the pkg-config check gates the wrong goals
 			printf "\nThese failed with no cutil present, so the \$$(error) still\n" >&2; \
 			printf "reaches them - and each exits having done nothing, which reads\n" >&2; \
 			printf "as success. Check the ifndef SKIP_DEP_CHECK wrapper.\n" >&2; \
+			exit 1; \
+		fi; \
+		unsec=""; \
+		for goal in all test install; do \
+			if $(MAKE) -n -f $(firstword $(MAKEFILE_LIST)) $$goal SECURITY_PC=$$absent \
+				>/dev/null 2>&1; then unsec="$$unsec $$goal"; fi; \
+		done; \
+		if [ -n "$$unsec" ]; then \
+			printf "\033[0;31m\n### goals that parsed with no security ###\033[0m\n" >&2; \
+			printf "%s\n" "$$unsec" >&2; \
+			printf "\nThese succeeded with no security present, so the second\n" >&2; \
+			printf "dependency is not checked the way cutil is.\n" >&2; \
 			exit 1; \
 		fi; \
 		unchecked=""; \
@@ -2637,7 +2709,7 @@ ORACLE := tools/oracle
 ORACLE_TEST_NAMES := testZstd_oracle testZstd_walk testZstd_dict_format \
 	testGzip_oracle testZlib_oracle testZlib_dictionary testLz4_spec_oracle \
 	testLz4_walk testDeflate_oracle testLzw_spec_oracle testRle_spec_oracle \
-	testBrotli testBrotli_encoder testBrotli_robustness testLzma_decoder testLzma_encoder testBzip2_decoder testBzip2_encoder testFilters \
+	testBrotli testBrotli_encoder testBrotli_robustness testLzma_decoder testLzma_encoder testBzip2_decoder testBzip2_encoder testFilters testXz \
 	testOracle testSeekable testGolden_provenance
 ORACLE_TESTS := $(addprefix $(APP_DIR)/,$(addsuffix $(EXE_EXTENSION),$(ORACLE_TEST_NAMES)))
 
@@ -3376,7 +3448,7 @@ LDCONF_INSTALL_PATH ?= /etc/ld.so.conf.d
 # What goes in the .pc Requires: field. Built from the same variables the
 # compile uses, so a dependency on another branch cannot be named one way for
 # the build and another way for consumers.
-PC_REQUIRES := $(CUTIL_PC)
+PC_REQUIRES := $(CUTIL_PC) $(SECURITY_PC)
 
 # Where this project's own .pc file is installed. Defaults to the directory
 # pkg-config is already being told to search, but separate from it so a

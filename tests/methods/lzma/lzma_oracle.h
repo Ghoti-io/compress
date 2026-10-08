@@ -72,6 +72,16 @@ struct Lib {
   int (*alone_decoder)(Stream *, uint64_t) = nullptr;
   int (*code)(Stream *, int) = nullptr;
   void (*end)(Stream *) = nullptr;
+  int (*easy_buffer_encode)(uint32_t, int, const void *, const uint8_t *, size_t,
+      uint8_t *, size_t *, size_t) = nullptr;
+  int (*stream_buffer_encode)(const Filter *, int, const void *,
+      const uint8_t *, size_t, uint8_t *, size_t *, size_t) = nullptr;
+  int (*stream_decoder)(Stream *, uint64_t, uint32_t) = nullptr;
+  int (*stream_encoder_mt)(Stream *, const void *) = nullptr;
+  bool xz_ok() const {
+    return easy_buffer_encode && stream_buffer_encode && stream_decoder &&
+        stream_encoder_mt && code && end;
+  }
   bool ok() const {
     return preset && raw_encode && raw_decode && alone_encoder &&
         alone_decoder && code && end;
@@ -97,6 +107,14 @@ inline const Lib & lib() {
           dlsym(h, "lzma_alone_decoder"));
       l.code = reinterpret_cast<decltype(l.code)>(dlsym(h, "lzma_code"));
       l.end = reinterpret_cast<decltype(l.end)>(dlsym(h, "lzma_end"));
+      l.easy_buffer_encode = reinterpret_cast<decltype(l.easy_buffer_encode)>(
+          dlsym(h, "lzma_easy_buffer_encode"));
+      l.stream_buffer_encode = reinterpret_cast<decltype(l.stream_buffer_encode)>(
+          dlsym(h, "lzma_stream_buffer_encode"));
+      l.stream_decoder = reinterpret_cast<decltype(l.stream_decoder)>(
+          dlsym(h, "lzma_stream_decoder"));
+      l.stream_encoder_mt = reinterpret_cast<decltype(l.stream_encoder_mt)>(
+          dlsym(h, "lzma_stream_encoder_mt"));
     }
   }
   return l;
@@ -257,6 +275,99 @@ inline std::vector<uint8_t> filter_apply(uint64_t id, void * fopts,
   }
   out.resize(opos);
   ok = true;
+  return out;
+}
+
+
+/* ---- xz ----------------------------------------------------------------- */
+
+constexpr int kCheckNone = 0, kCheckCrc32 = 1, kCheckCrc64 = 4,
+              kCheckSha256 = 10;
+
+/// What liblzma's .xz decoder made of a buffer. `ret` is its lzma_ret: 1 is a
+/// complete stream (or run of them) and anything else is a refusal.
+struct XzResult {
+  int ret = -1;
+  std::vector<uint8_t> out;
+  size_t consumed = 0;
+};
+
+/// Decode a whole .xz buffer. Concatenated streams, and the padding between
+/// them, are read as one, as the xz tool does.
+inline XzResult xz_decode(const std::vector<uint8_t> & in, size_t cap) {
+  XzResult r;
+  Stream s;
+  std::memset(&s, 0, sizeof(s));
+  r.out.assign(cap + 1, 0);
+  if (lib().stream_decoder(&s, UINT64_MAX, 0x08 /* LZMA_CONCATENATED */) != 0) {
+    return r;
+  }
+  s.next_in = in.data();
+  s.avail_in = in.size();
+  s.next_out = r.out.data();
+  s.avail_out = r.out.size();
+  r.ret = lib().code(&s, 3 /* LZMA_FINISH */);
+  r.out.resize(r.out.size() - s.avail_out);
+  r.consumed = in.size() - s.avail_in;
+  lib().end(&s);
+  return r;
+}
+
+/// A .xz stream from liblzma's default settings at a preset and check.
+inline std::vector<uint8_t> xz_encode(const std::vector<uint8_t> & in,
+    uint32_t preset, int check) {
+  std::vector<uint8_t> out(in.size() + in.size() / 2 + 4096);
+  size_t pos = 0;
+  if (lib().easy_buffer_encode(preset, check, nullptr, in.data(), in.size(),
+          out.data(), &pos, out.size()) != 0) {
+    return {};
+  }
+  out.resize(pos);
+  return out;
+}
+
+/// A single-block .xz stream through a chosen filter chain (the last of which
+/// is LZMA2).
+inline std::vector<uint8_t> xz_encode_chain(const std::vector<uint8_t> & in,
+    const Filter * chain, int check) {
+  std::vector<uint8_t> out(in.size() + in.size() / 2 + 4096);
+  size_t pos = 0;
+  if (lib().stream_buffer_encode(chain, check, nullptr, in.data(), in.size(),
+          out.data(), &pos, out.size()) != 0) {
+    return {};
+  }
+  out.resize(pos);
+  return out;
+}
+
+/// A multi-block .xz stream: the threaded encoder cuts blocks at @p block_size.
+/// lzma_mt has reserved fields after the ones used here, so it is built in a
+/// zeroed buffer larger than any version of it.
+inline std::vector<uint8_t> xz_encode_blocks(const std::vector<uint8_t> & in,
+    uint32_t preset, int check, uint64_t block_size) {
+  alignas(8) uint8_t mt[512];
+  std::memset(mt, 0, sizeof(mt));
+  const uint32_t threads = 2;
+  std::memcpy(mt + 4, &threads, 4);
+  std::memcpy(mt + 8, &block_size, 8);
+  std::memcpy(mt + 20, &preset, 4);
+  std::memcpy(mt + 32, &check, 4);
+  Stream s;
+  std::memset(&s, 0, sizeof(s));
+  std::vector<uint8_t> out(in.size() + in.size() / 2 + 65536);
+  if (lib().stream_encoder_mt(&s, mt) != 0) {
+    return {};
+  }
+  s.next_in = in.data();
+  s.avail_in = in.size();
+  s.next_out = out.data();
+  s.avail_out = out.size();
+  int r = lib().code(&s, 3 /* LZMA_FINISH */);
+  lib().end(&s);
+  if (r != 1) {
+    return {};
+  }
+  out.resize(out.size() - s.avail_out);
   return out;
 }
 

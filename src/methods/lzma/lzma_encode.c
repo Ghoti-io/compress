@@ -1724,6 +1724,15 @@ gcomp_status_t lzma_encoder_flush(
   return GCOMP_OK;
 }
 
+uint32_t lzma_encoder_dict_size(const gcomp_encoder_t * encoder) {
+  const lzma_enc_t * e;
+  if (!encoder || !encoder->method_state) {
+    return 0;
+  }
+  e = encoder->method_state;
+  return e->dict_size;
+}
+
 gcomp_status_t lzma_encoder_reset(gcomp_encoder_t * encoder) {
   lzma_enc_t * e;
   if (!encoder || !encoder->method_state) {
