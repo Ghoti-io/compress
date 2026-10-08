@@ -371,6 +371,8 @@ tests/
 │   │   ├── test_bzip2_bwt.cpp    # The suffix sort against the definition
 │   │   ├── test_bzip2_decoder.cpp # Against libbz2, byte-at-a-time, hand-built malformed blocks
 │   │   └── test_bzip2_encoder.cpp # Both decoders read it; blocks, runs, flush, bound
+│   ├── filters/                  # delta and bcj tests
+│   │   └── test_filters.cpp      # Against liblzma through [filter, LZMA2]; cuts, flush, reset, options
 │   ├── lzma/                     # LZMA and LZMA2 method tests
 │   │   ├── lzma_oracle.h         # liblzma loaded at run time, as the reference
 │   │   ├── test_lzma_decoder.cpp # Against liblzma, byte-at-a-time, malformed chunks

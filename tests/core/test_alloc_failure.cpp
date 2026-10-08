@@ -37,6 +37,7 @@
 
 #include <ghoti.io/compress/brotli.h>
 #include <ghoti.io/compress/bzip2.h>
+#include <ghoti.io/compress/filter.h>
 #include <ghoti.io/compress/lzma.h>
 #include <ghoti.io/compress/compress.h>
 #include <ghoti.io/compress/deflate.h>
@@ -188,6 +189,12 @@ gcomp_status_t register_all(gcomp_registry_t * reg) {
     return s;
   }
   if ((s = gcomp_method_bzip2_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_delta_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_bcj_register(reg)) != GCOMP_OK) {
     return s;
   }
   return gcomp_method_zstd_register(reg);
@@ -886,6 +893,21 @@ void add_scenarios(std::vector<Scenario> & out) {
       false});
   out.push_back({"bzip2/empty", "bzip2", bz_level(1), empty,
       Mode::StreamingTiny, true});
+
+  // delta and bcj allocate their state and nothing else, so one allocation
+  // each; the grid is here to see that a failure of that one is reported and
+  // that nothing is left behind.
+  out.push_back({"delta/text", "delta", nullptr, text, Mode::StreamingTiny,
+      true});
+  out.push_back({"delta/flush", "delta", nullptr, text, Mode::StreamingFlush,
+      false});
+  out.push_back({"delta/reset", "delta", nullptr, text, Mode::ResetReuse,
+      false});
+  out.push_back({"bcj/mixed", "bcj", nullptr, mixed, Mode::StreamingTiny,
+      true});
+  out.push_back({"bcj/reset", "bcj", nullptr, mixed, Mode::ResetReuse, false});
+  out.push_back({"bcj/empty", "bcj", nullptr, empty, Mode::StreamingTiny,
+      true});
 }
 
 //
@@ -945,6 +967,12 @@ TEST(AllocFailure, Lzma2) {
 }
 TEST(AllocFailure, Bzip2) {
   sweep_method("bzip2");
+}
+TEST(AllocFailure, Delta) {
+  sweep_method("delta");
+}
+TEST(AllocFailure, Bcj) {
+  sweep_method("bcj");
 }
 
 /**

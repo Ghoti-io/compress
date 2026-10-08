@@ -124,7 +124,7 @@ The following are used only inside the library and are **not** part of the publi
 
 ### Method Layer
 
-Each compression method (deflate, gzip, zlib, LZ4, LZW, RLE, zstd, brotli, lzma, lzma2, bzip2) implements the `gcomp_method_t` interface:
+Each compression method (deflate, gzip, zlib, LZ4, LZW, RLE, zstd, brotli, lzma, lzma2, bzip2, and the delta and bcj filters) implements the `gcomp_method_t` interface:
 
 ```c
 struct gcomp_method_s {
@@ -518,6 +518,7 @@ compress/
 │   ├── brotli.h                  # Brotli-specific API
 │   ├── lzma.h                    # LZMA and LZMA2 registration
 │   ├── bzip2.h                   # bzip2 registration
+│   ├── filter.h                  # delta and bcj registration
 │   ├── deflate.h                 # Deflate-specific API
 │   ├── gzip.h                    # Gzip-specific API
 │   ├── lz4.h                     # LZ4-specific API
@@ -562,6 +563,7 @@ compress/
 │   ├── autoreg/                  # Auto-registration support
 │   │   └── autoreg_platform.h    # Platform-specific constructors
 │   │
+│   ├── filters/                  # delta and bcj: transforms, and the streaming around them
 │   └── methods/                  # Compression method implementations
 │       ├── brotli/
 │       │   ├── brotli_decode.c   # RFC 7932 decoder

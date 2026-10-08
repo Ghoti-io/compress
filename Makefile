@@ -873,6 +873,7 @@ FUZZ_DEPFILES := $(patsubst fuzz/%.c,$(APP_DIR)/fuzz/%.d,$(FUZZ_SOURCES))
 .PHONY: fuzz-brotli-decoder fuzz-brotli-encoder fuzz-brotli-roundtrip
 .PHONY: fuzz-lzma-decoder fuzz-lzma-encoder fuzz-lzma-roundtrip
 .PHONY: fuzz-bzip2-decoder fuzz-bzip2-encoder fuzz-bzip2-roundtrip
+.PHONY: fuzz-filters-roundtrip
 .PHONY: fuzz-lzma2-decoder fuzz-lzma2-encoder fuzz-lzma2-roundtrip
 # Sanitizer commands
 .PHONY: test-asan test-asan-quiet test-ubsan sanitizer-help
@@ -1023,6 +1024,7 @@ fuzz-help: ## Show fuzzing help and instructions
 	@printf "    make fuzz-brotli-roundtrip- Run Brotli roundtrip fuzzer\n"
 	@printf "    make fuzz-lzma-decoder    - Run LZMA decoder fuzzer (also -encoder, -roundtrip, and fuzz-lzma2-*)\n"
 	@printf "    make fuzz-bzip2-decoder   - Run bzip2 decoder fuzzer (also -encoder, -roundtrip)\n"
+	@printf "    make fuzz-filters-roundtrip - Run the delta and bcj filter fuzzer\n"
 	@printf "\n"
 	@printf "Workflow:\n"
 	@printf "  1. make fuzz-corpus        # Generate seed inputs\n"
@@ -1561,6 +1563,21 @@ fuzz-bzip2-roundtrip: $(APP_DIR)/fuzz/fuzz_bzip2_roundtrip$(EXE_EXTENSION)
 		printf 'Hello' > fuzz/corpus/bzip2_roundtrip/hello.bin; \
 	fi
 	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/bzip2_roundtrip -o fuzz/findings/bzip2_roundtrip -- $(APP_DIR)/fuzz/fuzz_bzip2_roundtrip$(EXE_EXTENSION)
+
+fuzz-filters-roundtrip: ## Run delta and bcj filter roundtrip fuzzer (Ctrl+C to stop)
+fuzz-filters-roundtrip: $(APP_DIR)/fuzz/fuzz_filters_roundtrip$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running Filters Roundtrip Fuzzer  ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/filters_roundtrip
+	@if [ ! -d fuzz/corpus/filters_roundtrip ] || [ -z "$$(ls -A fuzz/corpus/filters_roundtrip 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/filters_roundtrip; \
+		printf '\x00\x00\x00\x00\x00\x00\xe8\x01\x02\x03\x00\x90\x90\x90' > fuzz/corpus/filters_roundtrip/call.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/filters_roundtrip -o fuzz/findings/filters_roundtrip -- $(APP_DIR)/fuzz/fuzz_filters_roundtrip$(EXE_EXTENSION)
 
 fuzz-lzma2-decoder: ## Run LZMA2 decoder fuzzer (Ctrl+C to stop)
 fuzz-lzma2-decoder: $(APP_DIR)/fuzz/fuzz_lzma2_decoder$(EXE_EXTENSION)
@@ -2620,7 +2637,7 @@ ORACLE := tools/oracle
 ORACLE_TEST_NAMES := testZstd_oracle testZstd_walk testZstd_dict_format \
 	testGzip_oracle testZlib_oracle testZlib_dictionary testLz4_spec_oracle \
 	testLz4_walk testDeflate_oracle testLzw_spec_oracle testRle_spec_oracle \
-	testBrotli testBrotli_encoder testBrotli_robustness testLzma_decoder testLzma_encoder testBzip2_decoder testBzip2_encoder \
+	testBrotli testBrotli_encoder testBrotli_robustness testLzma_decoder testLzma_encoder testBzip2_decoder testBzip2_encoder testFilters \
 	testOracle testSeekable testGolden_provenance
 ORACLE_TESTS := $(addprefix $(APP_DIR)/,$(addsuffix $(EXE_EXTENSION),$(ORACLE_TEST_NAMES)))
 

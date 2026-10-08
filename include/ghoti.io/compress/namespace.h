@@ -181,6 +181,8 @@
 #define gcomp_method_lzma_register GHOTIIO_COMPRESS(gcomp_method_lzma_register)
 #define gcomp_method_lzma2_register GHOTIIO_COMPRESS(gcomp_method_lzma2_register)
 #define gcomp_method_bzip2_register GHOTIIO_COMPRESS(gcomp_method_bzip2_register)
+#define gcomp_method_delta_register GHOTIIO_COMPRESS(gcomp_method_delta_register)
+#define gcomp_method_bcj_register GHOTIIO_COMPRESS(gcomp_method_bcj_register)
 #define gcomp_method_get_all_schemas GHOTIIO_COMPRESS(gcomp_method_get_all_schemas)
 #define gcomp_method_zlib_register GHOTIIO_COMPRESS(gcomp_method_zlib_register)
 #define gcomp_zlib_header_info_t GHOTIIO_COMPRESS(gcomp_zlib_header_info_t)

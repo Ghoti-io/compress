@@ -191,6 +191,75 @@ inline bool raw_decode(uint64_t id, const std::vector<uint8_t> & in,
   return r == 0 && ipos == in.size();
 }
 
+constexpr uint64_t kFilterDelta = 0x03ULL;
+constexpr uint64_t kFilterX86 = 0x04ULL;
+
+/// lzma_options_delta.
+struct DeltaOptions {
+  int type;
+  uint32_t dist;
+  uint32_t reserved_int1, reserved_int2;
+  int reserved_enum1, reserved_enum2;
+  void * reserved_ptr1;
+  void * reserved_ptr2;
+};
+
+/// lzma_options_bcj.
+struct BcjOptions {
+  uint32_t start_offset;
+};
+
+inline DeltaOptions delta_options(uint32_t dist) {
+  DeltaOptions d;
+  std::memset(&d, 0, sizeof(d));
+  d.dist = dist;
+  return d;
+}
+
+/**
+ * What a filter does to @p in, as liblzma does it. liblzma has no way to run a
+ * filter by itself - a chain must end in LZMA - so the data goes through
+ * [filter, LZMA2] and comes back through [LZMA2], which leaves what the filter
+ * made of it. @p forward false is the other direction: the data is compressed
+ * as it stands and read through [filter, LZMA2], so the filter's inverse is
+ * what comes out. Empty on any refusal, so that a refusal cannot pass for an
+ * answer; @p ok says which.
+ */
+inline std::vector<uint8_t> filter_apply(uint64_t id, void * fopts,
+    const std::vector<uint8_t> & in, bool forward, bool & ok) {
+  Options o = options(0);
+  std::vector<uint8_t> mid, out;
+  ok = false;
+  if (in.empty()) {
+    ok = true;
+    return {};
+  }
+  Filter lone[2] = {{kFilterLzma2, &o}, {kVliUnknown, nullptr}};
+  Filter chain[3] = {{id, fopts}, {kFilterLzma2, &o}, {kVliUnknown, nullptr}};
+  mid.resize(in.size() + in.size() / 2 + 4096);
+  size_t mpos = 0;
+  if (forward) {
+    if (lib().raw_encode(chain, nullptr, in.data(), in.size(), mid.data(),
+            &mpos, mid.size()) != 0) {
+      return {};
+    }
+  }
+  else if (lib().raw_encode(lone, nullptr, in.data(), in.size(), mid.data(),
+               &mpos, mid.size()) != 0) {
+    return {};
+  }
+  out.assign(in.size() + 1, 0);
+  size_t ipos = 0, opos = 0;
+  if (lib().raw_decode(forward ? lone : chain, nullptr, mid.data(), &ipos, mpos,
+          out.data(), &opos, out.size()) != 0 ||
+      opos != in.size()) {
+    return {};
+  }
+  out.resize(opos);
+  ok = true;
+  return out;
+}
+
 } // namespace lzmaref
 
 #endif
