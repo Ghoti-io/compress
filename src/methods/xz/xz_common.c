@@ -97,7 +97,7 @@ static void crc64_ready(void) {
   }
 }
 
-uint64_t xz_crc64_update(uint64_t crc, const uint8_t * data, size_t n) {
+uint64_t xz_crc64_update_scalar(uint64_t crc, const uint8_t * data, size_t n) {
   crc64_ready();
   while (n >= 8) {
     uint64_t w = (uint64_t)data[0] | (uint64_t)data[1] << 8 |
@@ -116,6 +116,13 @@ uint64_t xz_crc64_update(uint64_t crc, const uint8_t * data, size_t n) {
     crc = g_crc64_table[0][(crc ^ *data++) & 0xFF] ^ (crc >> 8);
   }
   return crc;
+}
+
+uint64_t xz_crc64_update(uint64_t crc, const uint8_t * data, size_t n) {
+  if (n >= XZ_CRC64_PCLMUL_MIN && xz_crc64_pclmul_available()) {
+    return xz_crc64_update_pclmul(crc, data, n);
+  }
+  return xz_crc64_update_scalar(crc, data, n);
 }
 
 uint32_t xz_crc32(const uint8_t * data, size_t n) {

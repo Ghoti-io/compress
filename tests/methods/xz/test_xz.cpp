@@ -33,6 +33,7 @@
  */
 
 #include "../lzma/lzma_oracle.h"
+#include "methods/xz/xz_internal.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -1882,6 +1883,49 @@ TEST(XzThreads, TheWorkersReallyRunOnOtherThreads) {
   }
   EXPECT_EQ(decoded_on_workers[0], 0u);
   EXPECT_GT(decoded_on_workers[1], 0u) << "no block was decoded on a worker";
+}
+
+
+/* ---- the CRC-64 check --------------------------------------------------- */
+
+TEST(XzCrc64, TheFoldingVersionIsTheTableVersion) {
+  if (!xz_crc64_pclmul_available()) {
+    GTEST_SKIP() << "no carry-less multiply on this CPU or build";
+  }
+  /* The published check value of CRC-64/XZ: "123456789" is 995DC9BBDF1939FA. */
+  const uint8_t nine[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+  EXPECT_EQ(~xz_crc64_update_scalar(~0ull, nine, 9), 0x995DC9BBDF1939FAull);
+  Bytes buf(4096 + 64);
+  g_seed = 99;
+  for (auto & b : buf) {
+    b = (uint8_t)next_rand();
+  }
+  for (size_t len = 0; len <= 300; len++) {
+    for (size_t align = 0; align < 16; align++) {
+      const uint64_t start = ((uint64_t)next_rand() << 48) |
+          ((uint64_t)next_rand() << 32) | ((uint64_t)next_rand() << 16) |
+          next_rand();
+      ASSERT_EQ(xz_crc64_update_pclmul(start, buf.data() + align, len),
+          xz_crc64_update_scalar(start, buf.data() + align, len))
+          << "len " << len << " align " << align;
+    }
+  }
+  for (size_t len : {size_t(1000), size_t(4096), size_t(4095), size_t(65536)}) {
+    Bytes big(len + 16);
+    for (auto & b : big) {
+      b = (uint8_t)next_rand();
+    }
+    ASSERT_EQ(xz_crc64_update_pclmul(~0ull, big.data() + 3, len),
+        xz_crc64_update_scalar(~0ull, big.data() + 3, len)) << len;
+  }
+  /* In pieces, as the encoder and decoder feed it. */
+  uint64_t whole = xz_crc64_update_pclmul(~0ull, buf.data(), 4096);
+  uint64_t parts = ~0ull;
+  for (size_t off = 0; off < 4096; off += 100) {
+    parts = xz_crc64_update_pclmul(
+        parts, buf.data() + off, std::min<size_t>(100, 4096 - off));
+  }
+  EXPECT_EQ(parts, whole);
 }
 
 } // namespace

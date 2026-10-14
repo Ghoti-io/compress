@@ -95,6 +95,13 @@ void xz_check_final(xz_check_t * c, uint8_t * out);
 /** CRC-64/XZ (ECMA-182 polynomial, reflected), running value in and out. */
 uint64_t xz_crc64_update(uint64_t crc, const uint8_t * data, size_t n);
 
+/** The table version, and the carry-less multiply folding one that needs at
+ *  least ::XZ_CRC64_PCLMUL_MIN bytes and a CPU that has it. */
+uint64_t xz_crc64_update_scalar(uint64_t crc, const uint8_t * data, size_t n);
+uint64_t xz_crc64_update_pclmul(uint64_t crc, const uint8_t * data, size_t n);
+int xz_crc64_pclmul_available(void);
+#define XZ_CRC64_PCLMUL_MIN 64u
+
 /** Little-endian stores and loads. */
 static inline void xz_put_le32(uint8_t * p, uint32_t v) {
   p[0] = (uint8_t)v;
