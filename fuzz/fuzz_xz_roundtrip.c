@@ -77,7 +77,7 @@ static int64_t level_from(const uint8_t * input, size_t input_size) {
 static gcomp_options_t * encoder_options(int64_t cfg, int64_t level) {
   static const char * const checks[] = {"none", "crc32", "crc64", "sha256"};
   static const char * const filters[] = {
-      "", "delta", "x86", "arm64", "x86,delta:3"};
+      "", "delta", "x86", "arm64", "riscv", "x86,delta:3"};
   gcomp_options_t * opts = NULL;
   (void)level;
   gcomp_options_create(&opts);
@@ -85,8 +85,8 @@ static gcomp_options_t * encoder_options(int64_t cfg, int64_t level) {
     gcomp_options_set_int64(opts, "xz.preset", cfg % 3);
     gcomp_options_set_uint64(opts, "xz.dict_size", 65536);
     gcomp_options_set_string(opts, "xz.check", checks[(cfg >> 2) % 4]);
-    if ((cfg >> 4) % 5 != 0) {
-      gcomp_options_set_string(opts, "xz.filters", filters[(cfg >> 4) % 5]);
+    if ((cfg >> 4) % 6 != 0) {
+      gcomp_options_set_string(opts, "xz.filters", filters[(cfg >> 4) % 6]);
     }
     if (((cfg >> 7) & 8) == 0) {
       gcomp_options_set_uint64(opts, "xz.block_size", 512u << ((cfg >> 7) & 7));

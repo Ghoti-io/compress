@@ -524,7 +524,7 @@ TEST(Xz, FiltersInFrontOfLzma2AreReadByLiblzma) {
     }
   }
   const char * specs[] = {"delta", "delta:7", "x86", "x86:4096", "arm64",
-      "powerpc", "ia64:16", "arm", "armthumb", "sparc", "x86,delta:4",
+      "powerpc", "ia64:16", "arm", "armthumb", "sparc", "riscv", "x86,delta:4",
       "delta:2,arm64,delta:8"};
   for (const char * spec : specs) {
     gcomp_options_t * o = Opts({{"xz.filters", spec}, {"xz.check", "crc32"}},

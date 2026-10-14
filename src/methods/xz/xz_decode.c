@@ -291,6 +291,7 @@ static uint32_t bcj_alignment(unsigned id) {
   case FILTER_ARCH_ARM64:
     return 4;
   case FILTER_ARCH_ARMTHUMB:
+  case FILTER_ARCH_RISCV:
     return 2;
   case FILTER_ARCH_IA64:
     return 16;

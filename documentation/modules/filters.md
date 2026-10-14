@@ -19,18 +19,18 @@ Both are auto-registered with the default registry when the library loads. For a
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `delta.distance` | int64 | 1 | How far back the byte to subtract is, 1..256. |
-| `bcj.arch` | string | `x86` | The instruction set: `x86`, `powerpc`, `ia64`, `arm`, `armthumb`, `sparc` or `arm64`. The decoder must be given the same. |
+| `bcj.arch` | string | `x86` | The instruction set: `x86`, `powerpc`, `ia64`, `arm`, `armthumb`, `sparc`, `arm64` or `riscv`. The decoder must be given the same. |
 | `bcj.start_offset` | uint64 | 0 | The address of the first byte as the code will see it, up to 2^32 - 1. Zero unless the data is a piece cut from the middle of a program. |
 
 Unknown keys, an unknown architecture and a distance outside 1..256 are refused when the encoder or decoder is created.
 
 ## Behaviour
 
-**A converter holds bytes back.** An x86 call is five bytes and the last four are its displacement, so a buffer that ends in the middle of one cannot be settled yet. The converter returns the bytes it could settle and keeps the rest until more arrives, up to 15 of them for IA-64's 16-byte bundles. At `finish()` the bytes still held are let through unchanged, which is what xz does, and what makes the output the same size as the input. Where the bytes are cut, between `update()` calls or in the size of the output buffer, does not change the output; the tests cut at every size from one byte up.
+**A converter holds bytes back.** An x86 call is five bytes and the last four are its displacement, so a buffer that ends in the middle of one cannot be settled yet. The converter returns the bytes it could settle and keeps the rest until more arrives, up to 15 of them for IA-64's 16-byte bundles (RISC-V holds at most 7). At `finish()` the bytes still held are let through unchanged, which is what xz does, and what makes the output the same size as the input. Where the bytes are cut, between `update()` calls or in the size of the output buffer, does not change the output; the tests cut at every size from one byte up.
 
 **Only delta flushes.** Delta settles every byte as it arrives, so `gcomp_encoder_flush()` has nothing to hold back and emits everything consumed. A branch converter cannot flush without giving up the bytes it is holding, which would change what the next bytes become, so `bcj` reports `GCOMP_ERR_UNSUPPORTED`, as xz does.
 
-**Not every architecture is here.** RISC-V (xz filter id 0x0B, added in xz 5.6) is not implemented. Its converter pairs an `auipc` with the instruction after it and has several special cases for which the encoding must agree with xz to the bit; it will be added when there is something to check it against beyond liblzma itself.
+**RISC-V was derived from behaviour.** The RISC-V converter (xz filter id 0x0B, added in xz 5.6) has no specification beyond the code that writes it. Ours was written without reading that code: liblzma 5.8.1 was treated as a black box in its pinned image, its output for crafted inputs was recorded, and the converter was written from those records. It rewrites `jal` through x1 or x5 and merges an `auipc` with the word after it, as xz does, and agrees with liblzma byte for byte in both directions on the tests' streams, but it is not a transcription and a case the tests never reached could differ. The observations are in the workspace's `notes/compress/RISCV-FILTER-OBSERVATIONS.md`.
 
 **The bound** is the length: nothing grows. `gcomp_encode_bound()` answers with the input size.
 

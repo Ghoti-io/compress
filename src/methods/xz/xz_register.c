@@ -154,7 +154,7 @@ static const gcomp_option_schema_t g_xz_option_schemas[] = {
         0,
         0,
         0,
-        "Filters applied before LZMA2, comma separated, in the order they are applied when encoding: delta, delta:N, or x86, powerpc, ia64, arm, armthumb, sparc, arm64, each with an optional :OFFSET. At most three.",
+        "Filters applied before LZMA2, comma separated, in the order they are applied when encoding: delta, delta:N, or x86, powerpc, ia64, arm, armthumb, sparc, arm64, riscv, each with an optional :OFFSET. At most three.",
         NULL,
     },
     {

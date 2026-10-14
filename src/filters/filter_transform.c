@@ -81,6 +81,7 @@ int filter_bcj_known(unsigned arch) {
   case FILTER_ARCH_ARMTHUMB:
   case FILTER_ARCH_SPARC:
   case FILTER_ARCH_ARM64:
+  case FILTER_ARCH_RISCV:
     return 1;
   default:
     return 0;
@@ -370,6 +371,116 @@ static size_t bcj_arm64(
   return i;
 }
 
+/* RISC-V. Derived from observed behaviour, not from anyone's source: see
+ * notes/compress/RISCV-FILTER-OBSERVATIONS.md in the workspace, whose O-numbers
+ * the comments below cite.
+ *
+ * Two shapes are rewritten. A `jal` that links through x1 or x5 has its offset
+ * replaced by the absolute target (O1). An `auipc` followed by a word that
+ * uses the auipc's register as rs1 has the two merged into a marker pair: an
+ * `auipc` into x2 carrying the second word's low 20 bits, then the 32-bit
+ * target stored most-significant byte first (O2). A source pair that already
+ * looks like a marker would not survive a round trip, so each direction also
+ * maps the other direction's output back (O2, "escape"). The scan visits every
+ * 2-byte offset and moves on by a count that depends on what it found (O3). */
+
+static inline uint32_t riscv_jal_target(uint32_t w) {
+  return ((w >> 24) & 0xFFu) << 1 | ((w >> 16) & 0xFFu) << 9 |
+      ((w >> 12) & 0xFu) << 17;
+}
+
+static inline uint32_t riscv_jal_pack(uint32_t a) {
+  return ((a >> 1) & 0xFFu) << 24 | ((a >> 9) & 0xFFu) << 16 |
+      ((a >> 17) & 0xFu) << 12;
+}
+
+/* The J-immediate of a jal, as the 21-bit value it encodes (bit 0 clear). */
+static inline uint32_t riscv_jimm_get(uint32_t w) {
+  return ((w >> 31) & 1u) << 20 | ((w >> 21) & 0x3FFu) << 1 |
+      ((w >> 20) & 1u) << 11 | ((w >> 12) & 0xFFu) << 12;
+}
+
+static inline uint32_t riscv_jimm_put(uint32_t v) {
+  return ((v >> 20) & 1u) << 31 | ((v >> 1) & 0x3FFu) << 21 |
+      ((v >> 11) & 1u) << 20 | ((v >> 12) & 0xFFu) << 12;
+}
+
+/* A 12-bit field's value as a signed 32-bit quantity, modulo 2^32. */
+static inline uint32_t sext12(uint32_t v) {
+  return (v & 0x800u) ? (v | 0xFFFFF000u) : v;
+}
+
+static size_t bcj_riscv(
+    uint32_t now_pos, int encoding, uint8_t * buf, size_t size) {
+  size_t i = 0;
+  while (i + 8 <= size) {
+    const uint32_t w = get_le32(buf + i);
+    const uint32_t pos = now_pos + (uint32_t)i;
+    const uint32_t op = w & 0x7Fu;
+    const uint32_t rd = (w >> 7) & 0x1Fu;
+    if (op == 0x6Fu) {
+      if (rd == 1 || rd == 5) {
+        uint32_t nw;
+        if (encoding) {
+          nw = riscv_jal_pack(pos + riscv_jimm_get(w));
+        }
+        else {
+          nw = riscv_jimm_put(riscv_jal_target(w) - pos);
+        }
+        put_le32(buf + i, nw | (w & 0xFFFu));
+        i += 4;
+      }
+      else {
+        i += 2;
+      }
+    }
+    else if (op == 0x17u) {
+      const uint32_t w1 = get_le32(buf + i + 4);
+      if (rd != 0 && rd != 2) {
+        if ((w1 & 3u) == 3u && ((w1 >> 15) & 0x1Fu) == rd) {
+          put_le32(buf + i, (w1 & 0xFFFFFu) << 12 | 0x117u);
+          if (encoding) {
+            put_be32(buf + i + 4,
+                (w & 0xFFFFF000u) + sext12(w1 >> 20) + pos);
+          }
+          else {
+            put_le32(buf + i + 4, (w & 0xFFFFF000u) | (w1 >> 20));
+          }
+          i += 8;
+        }
+        else {
+          i += 6;
+        }
+      }
+      else {
+        const uint32_t top = w >> 27;
+        if (rd == 2 && top != 0 && top != 2 && ((w >> 12) & 3u) == 3u) {
+          uint32_t w0n, w1n;
+          if (encoding) {
+            w0n = (w1 & 0xFFFFF000u) | top << 7 | 0x17u;
+            w1n = (w1 & 0xFFFu) << 20 | (w >> 12);
+          }
+          else {
+            const uint32_t addr = get_be32(buf + i + 4) - pos;
+            w0n = ((addr + 0x800u) & 0xFFFFF000u) | top << 7 | 0x17u;
+            w1n = (addr & 0xFFFu) << 20 | (w >> 12);
+          }
+          put_le32(buf + i, w0n);
+          put_le32(buf + i + 4, w1n);
+          i += 8;
+        }
+        else {
+          i += 4;
+        }
+      }
+    }
+    else {
+      i += 2;
+    }
+  }
+  return i;
+}
+
 size_t filter_bcj_code(filter_bcj_state_t * st, unsigned arch,
     uint32_t now_pos, int encoding, uint8_t * buf, size_t size) {
   switch (arch) {
@@ -387,6 +498,8 @@ size_t filter_bcj_code(filter_bcj_state_t * st, unsigned arch,
     return bcj_sparc(now_pos, encoding, buf, size);
   case FILTER_ARCH_ARM64:
     return bcj_arm64(now_pos, encoding, buf, size);
+  case FILTER_ARCH_RISCV:
+    return bcj_riscv(now_pos, encoding, buf, size);
   default:
     return size;
   }

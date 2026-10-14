@@ -85,12 +85,13 @@ static const struct {
     {"armthumb", FILTER_ARCH_ARMTHUMB},
     {"sparc", FILTER_ARCH_SPARC},
     {"arm64", FILTER_ARCH_ARM64},
+    {"riscv", FILTER_ARCH_RISCV},
 };
 
 #define ARCH_COUNT (sizeof(g_arch) / sizeof(g_arch[0]))
 
 static const char * const g_arch_names[] = {
-    "x86", "powerpc", "ia64", "arm", "armthumb", "sparc", "arm64", NULL};
+    "x86", "powerpc", "ia64", "arm", "armthumb", "sparc", "arm64", "riscv", NULL};
 
 int filter_arch_id(const char * name, unsigned * id_out) {
   size_t i;
@@ -495,7 +496,7 @@ static const gcomp_option_schema_t g_bcj_schemas[] = {
         0,
         0,
         "The instruction set whose branches are converted: x86, powerpc, ia64, "
-        "arm, armthumb, sparc or arm64. The decoder must be given the same.",
+        "arm, armthumb, sparc, arm64 or riscv. The decoder must be given the same.",
         g_arch_names,
     },
     {

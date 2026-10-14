@@ -105,6 +105,7 @@ const Arch kArches[] = {
     {"armthumb", 0x08, 2},
     {"sparc", 0x09, 4},
     {"arm64", 0x0A, 4},
+    {"riscv", 0x0B, 2},
 };
 
 /// Bytes that are a good fraction branches of the architecture, and the rest
@@ -184,6 +185,52 @@ Bytes code_like(const Arch & a, size_t n, uint32_t seed) {
         }
       }
       out.insert(out.end(), b, b + 16);
+    }
+    else if (name == "riscv") {
+      /* next_rand() is 16 bits, so every 32-bit word is two draws, and each
+       * choice below tests a bit that draw really has. */
+      const uint32_t full = (uint32_t)next_rand() << 16 | next_rand();
+      const uint32_t full2 = (uint32_t)next_rand() << 16 | next_rand();
+      const uint32_t reg = (r & 0x40) ? ((r & 0x80) ? 1u : 5u) : (q & 31u);
+      uint32_t w[2] = {full, full2};
+      size_t words = 1;
+      const uint32_t kind = r % 10;
+      if (kind < 2) {
+        /* jal, mostly through x1 or x5 */
+        w[0] = (full & ~0x00000FFFu) | reg << 7 | 0x6Fu;
+      }
+      else if (kind < 5) {
+        /* auipc and a second word that usually has the same register as rs1
+         * and the low bits of a 32-bit instruction */
+        w[0] = (full & ~0x00000FFFu) | reg << 7 | 0x17u;
+        w[1] = full2;
+        if (r & 0x100) {
+          w[1] = (w[1] & ~(31u << 15)) | reg << 15;
+        }
+        if (r & 0x200) {
+          w[1] |= 3u;
+        }
+        words = 2;
+      }
+      else if (kind < 7) {
+        /* a pair as the encoder writes it: auipc into x2, and bits 13:12 set,
+         * with the register in the top five bits */
+        w[0] = (full & 0xFFFFC000u) | ((r & 0x400) ? 0x3000u : 0u) | 0x117u;
+        if (r & 0x800) {
+          w[0] = (w[0] & 0x07FFFFFFu) | (q & 31u) << 27;
+        }
+        words = 2;
+      }
+      /* the rest is noise; a halfword now and then moves the alignment */
+      for (size_t k = 0; k < words; k++) {
+        for (int i = 0; i < 4; i++) {
+          out.push_back((uint8_t)(w[k] >> (8 * i)));
+        }
+      }
+      if (r % 7 == 0) {
+        out.push_back((uint8_t)q);
+        out.push_back((uint8_t)(q >> 8));
+      }
     }
     else if (name == "arm64") {
       uint32_t w = (uint32_t)next_rand() << 16 | next_rand();

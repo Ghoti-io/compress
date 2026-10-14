@@ -31,7 +31,7 @@
 #define MAX_INPUT_SIZE (64 * 1024)
 
 static const char * const k_arch[] = {
-    "x86", "powerpc", "ia64", "arm", "armthumb", "sparc", "arm64"};
+    "x86", "powerpc", "ia64", "arm", "armthumb", "sparc", "arm64", "riscv"};
 
 static uint8_t * read_stdin(size_t * size_out) {
   uint8_t * buffer = malloc(MAX_INPUT_SIZE);
@@ -156,7 +156,7 @@ int main(GCOMP_MAYBE_UNUSED(int argc), GCOMP_MAYBE_UNUSED(char ** argv)) {
     uint32_t start = (uint32_t)input[3] << 4 | (uint32_t)input[4] << 12 |
         (uint32_t)input[5] << 20;
     method = "bcj";
-    gcomp_options_set_string(opts, "bcj.arch", k_arch[(sel >> 1) % 7]);
+    gcomp_options_set_string(opts, "bcj.arch", k_arch[(sel >> 1) % 8]);
     gcomp_options_set_uint64(opts, "bcj.start_offset", start);
   }
 

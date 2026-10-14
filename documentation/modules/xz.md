@@ -19,7 +19,7 @@ xz is auto-registered with the default registry when the library loads. For a re
 | `xz.lc`, `xz.lp`, `xz.pb` | int64 | 3, 0, 2 | Literal context bits, literal position bits and position bits, each 0..4; `lc + lp` at most 4, which is LZMA2's limit. |
 | `xz.check` | string | `crc64` | The integrity check of each block: `none`, `crc32`, `crc64` or `sha256`. |
 | `xz.block_size` | uint64 | 0 | Uncompressed bytes per block; 0 puts the whole stream in one. Smaller blocks cost ratio and let a reader decode one without the rest. |
-| `xz.filters` | string | empty | Filters applied before LZMA2, comma separated, in the order they are applied when encoding: `delta`, `delta:N`, or `x86`, `powerpc`, `ia64`, `arm`, `armthumb`, `sparc`, `arm64`, each with an optional `:OFFSET`. At most three. |
+| `xz.filters` | string | empty | Filters applied before LZMA2, comma separated, in the order they are applied when encoding: `delta`, `delta:N`, or `x86`, `powerpc`, `ia64`, `arm`, `armthumb`, `sparc`, `arm64`, `riscv`, each with an optional `:OFFSET`. At most three. |
 | `limits.max_output_bytes` | uint64 | 0 (unlimited) | Maximum decompressed output. |
 | `limits.max_memory_bytes` | uint64 | 0 (unlimited) | Maximum working memory, for the decoder's windows and the list of blocks, and the encoder's list. |
 | `limits.max_expansion_ratio` | uint64 | 8192 | Maximum output/input ratio, which is LZMA2's own ceiling. |
@@ -35,7 +35,7 @@ Unknown keys, an unknown check or filter name, and a number out of range are ref
 
 **The window is the one the header names.** The block's LZMA2 stage is given the block's dictionary as its window, so a match that reaches farther back than the header said is corrupt, as in liblzma. A header that names a dictionary over `limits.max_window_bytes` is refused with `GCOMP_ERR_LIMIT`, before anything is allocated for it.
 
-**Unsupported things are refused, not skipped.** The format reserves twelve more integrity checks than the four implemented, and a stream that names one is `GCOMP_ERR_UNSUPPORTED` rather than decoded without its check: a caller who asked for a stream to be verified cannot be told it was not. The same goes for an unknown filter, a flag bit the format has not defined and the RISC-V filter (see filters.md).
+**Unsupported things are refused, not skipped.** The format reserves twelve more integrity checks than the four implemented, and a stream that names one is `GCOMP_ERR_UNSUPPORTED` rather than decoded without its check: a caller who asked for a stream to be verified cannot be told it was not. The same goes for an unknown filter, a flag bit the format has not defined.
 
 **Truncation is an error at `finish()`**, whatever the point: inside a header, a block, the index, or between the last block and the index.
 
