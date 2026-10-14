@@ -213,6 +213,22 @@ static const gcomp_option_schema_t g_xz_option_schemas[] = {
         "Maximum dictionary a block may name. Default is 1.5 GiB, xz's largest.",
         NULL,
     },
+    {
+        "threads.count",
+        GCOMP_OPT_UINT64,
+        1,
+        {.ui64 = 1},
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        "Worker threads (0 or 1: on the calling thread). The encoder uses "
+        "them only when xz.block_size is set, and the output does not depend "
+        "on the count. The decoder uses them on a stream of several blocks.",
+        NULL,
+    },
 };
 
 /* Kept in step with the schema above by SchemaAllMethodsTest. */
@@ -229,6 +245,7 @@ static const char * const g_xz_option_keys[] = {
     "limits.max_memory_bytes",
     "limits.max_expansion_ratio",
     "limits.max_window_bytes",
+    "threads.count",
 };
 
 static const gcomp_method_schema_t g_xz_schema = {
@@ -369,6 +386,7 @@ static const gcomp_method_t g_xz_method = {
     .get_schema = xz_get_schema,
     .encode_bound = xz_encode_bound,
     .peek = xz_peek,
+    .decode_parallel = xz_decode_parallel,
 };
 
 gcomp_status_t gcomp_method_xz_register(gcomp_registry_t * registry) {

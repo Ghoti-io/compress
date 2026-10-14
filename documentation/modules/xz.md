@@ -20,6 +20,7 @@ xz is auto-registered with the default registry when the library loads. For a re
 | `xz.check` | string | `crc64` | The integrity check of each block: `none`, `crc32`, `crc64` or `sha256`. |
 | `xz.block_size` | uint64 | 0 | Uncompressed bytes per block; 0 puts the whole stream in one. Smaller blocks cost ratio and let a reader decode one without the rest. |
 | `xz.filters` | string | empty | Filters applied before LZMA2, comma separated, in the order they are applied when encoding: `delta`, `delta:N`, or `x86`, `powerpc`, `ia64`, `arm`, `armthumb`, `sparc`, `arm64`, `riscv`, each with an optional `:OFFSET`. At most three. |
+| `threads.count` | uint64 | 1 | Worker threads. The encoder uses them only when `xz.block_size` is set; the decoder uses them to decode a stream of several blocks. The output never depends on the count. |
 | `limits.max_output_bytes` | uint64 | 0 (unlimited) | Maximum decompressed output. |
 | `limits.max_memory_bytes` | uint64 | 0 (unlimited) | Maximum working memory, for the decoder's windows and the list of blocks, and the encoder's list. |
 | `limits.max_expansion_ratio` | uint64 | 8192 | Maximum output/input ratio, which is LZMA2's own ceiling. |
@@ -37,6 +38,8 @@ Unknown keys, an unknown check or filter name, and a number out of range are ref
 
 **Unsupported things are refused, not skipped.** The format reserves twelve more integrity checks than the four implemented, and a stream that names one is `GCOMP_ERR_UNSUPPORTED` rather than decoded without its check: a caller who asked for a stream to be verified cannot be told it was not. The same goes for an unknown filter, a flag bit the format has not defined.
 
+**Threads decode whole buffers.** `gcomp_decode_buffer()` with `threads.count` above one decodes the blocks of a single stream on workers, found from the index at the end. Each worker is given a stream of just its block and runs the ordinary decoder on it, so every check is the one a single thread makes. Whatever this path cannot take, or fails on, is left to the ordinary decoder, which gives the verdict: one thread, a stream of fewer than two blocks, several streams, an index that does not agree with the footer, output over the buffer or `limits.max_output_bytes`. A corrupt stream is therefore decoded twice. The streaming decoder is still one thread.
+
 **Truncation is an error at `finish()`**, whatever the point: inside a header, a block, the index, or between the last block and the index.
 
 ## What the encoder does
@@ -48,6 +51,8 @@ Unknown keys, an unknown check or filter name, and a number out of range are ref
 **The chain.** A block's filters and LZMA2 are the methods of those names (`delta`, `bcj`, `lzma2`), run one into the next through a small buffer between each pair. With no filter the block is LZMA2 alone and nothing is copied extra.
 
 **Flush ends the block.** A block is the unit a reader can decode on its own, and a branch converter may be holding bytes back that a sync flush could not give up. So `gcomp_encoder_flush()`, in either mode, closes the open block and writes it out; what follows starts a new one. The stream is not ended.
+
+**Threads.** With `threads.count` above one and `xz.block_size` set, blocks are coded by workers. The stream is the same bytes at any thread count, because each worker codes its block as a stream of one block through the same options and the block is cut out of it; so `threads.count` is a speed setting and nothing else. With no block size there is one block and nothing to share out, so threads do nothing: set `xz.block_size` to choose how much ratio to give up for speed, since a block cannot match across its edge. A block in flight holds its input and its coded stream, about twice the block size; `limits.max_memory_bytes` too small to hold two blocks keeps the encoder in line. A flush closes the open block as it does without threads.
 
 **Bound.** The input, 6 bytes for each 16 KiB, and about 150 bytes for each block, plus 44 for the two ends and the index. A real stream is a few bytes over the input at worst.
 

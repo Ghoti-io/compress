@@ -48,6 +48,7 @@
 #include <ghoti.io/compress/macros.h>
 
 #include "../../core/alloc_internal.h"
+#include "../../core/parallel_block.h"
 #include "../../core/bound_internal.h"
 #include "../../core/registry_internal.h"
 #include "../../core/stream_internal.h"
@@ -90,7 +91,19 @@ typedef struct {
   size_t rec_n, rec_cap;
   uint8_t * tail;
   size_t tail_len, tail_pos;
+
+  struct xz_par * par; /* threads: blocks coded by workers; NULL: in line */
 } xz_enc_t;
+
+/* The threaded encoder, further down. */
+static gcomp_status_t par_init(
+    xz_enc_t * e, gcomp_options_t * options, uint64_t threads);
+static void par_destroy(xz_enc_t * e);
+static void par_abandon(xz_enc_t * e);
+static gcomp_status_t par_update(gcomp_encoder_t * encoder, xz_enc_t * e,
+    gcomp_buffer_t * input, gcomp_buffer_t * output);
+static gcomp_status_t par_flush_all(gcomp_encoder_t * encoder, xz_enc_t * e,
+    gcomp_buffer_t * output);
 
 /* ---- the small queue ---------------------------------------------------- */
 
@@ -258,7 +271,7 @@ static gcomp_status_t encoder_init(gcomp_registry_t * registry,
   const gcomp_allocator_t * alloc = gcomp_registry_get_allocator(registry);
   xz_enc_t * e;
   int64_t preset = 6, lc = 3, lp = 0, pb = 2;
-  uint64_t dict = 0;
+  uint64_t dict = 0, threads = 1;
   const char * str = NULL;
   char err[96];
   gcomp_status_t s;
@@ -280,6 +293,7 @@ static gcomp_status_t encoder_init(gcomp_registry_t * registry,
     (void)gcomp_options_get_int64(options, "xz.lp", &lp);
     (void)gcomp_options_get_int64(options, "xz.pb", &pb);
     (void)gcomp_options_get_uint64(options, "xz.block_size", &e->block_size);
+    (void)gcomp_options_get_uint64(options, "threads.count", &threads);
     if (gcomp_options_get_string(options, "xz.check", &str) == GCOMP_OK && str) {
       for (i = 0; i < sizeof(g_checks) / sizeof(g_checks[0]); i++) {
         if (strcmp(str, g_checks[i]) == 0) {
@@ -321,6 +335,11 @@ static gcomp_status_t encoder_init(gcomp_registry_t * registry,
   if (s != GCOMP_OK) {
     return s;
   }
+  s = par_init(e, options, threads);
+  if (s != GCOMP_OK) {
+    return gcomp_encoder_set_error(
+        encoder, s, "xz: could not start the worker threads");
+  }
   state_reset(e);
   return GCOMP_OK;
 }
@@ -331,6 +350,7 @@ void xz_encoder_destroy(gcomp_encoder_t * encoder) {
     return;
   }
   e = encoder->method_state;
+  par_destroy(e);
   xz_chain_clear(&e->chain);
   gcomp_options_destroy(e->lzma_opts);
   gcomp_free(e->alloc, e->rec);
@@ -350,6 +370,427 @@ gcomp_status_t xz_encoder_init(gcomp_registry_t * registry,
   return s;
 }
 
+
+
+static gcomp_status_t push_record(xz_enc_t * e, uint64_t unpadded, uint64_t unc);
+
+/* ---- threads ------------------------------------------------------------ */
+
+/* With `threads.count` above one and a block size, the blocks are coded by
+ * workers. A worker does not share the chain: it codes its block as a stream
+ * of one block, through the same registry and the same options, and the
+ * block is cut out of that stream (the 12 bytes of header in front, the index
+ * and footer behind). Each block is independent, so what comes out is the
+ * serial encoder's block byte for byte, and the stream is the same bytes at
+ * any number of threads. The buffers of a block in flight are its input and
+ * its coded stream. */
+
+typedef struct xz_pjob_s {
+  gcomp_block_job_t base; /* first: the helper keeps its ticket here */
+  gcomp_registry_t * registry;
+  gcomp_options_t * opts; /* shared, read only */
+  struct xz_pjob_s * next;
+  uint8_t * in;
+  size_t in_n, in_cap;
+  uint8_t * out;
+  size_t out_cap, out_len;
+  size_t blk_off, blk_len; /* the block, inside out */
+  uint64_t unpadded, unc;
+  size_t pos; /* how much of the block has gone to the caller */
+  gcomp_status_t status;
+} xz_pjob_t;
+
+typedef struct xz_par {
+  gcomp_parallel_block_ctx_t * pb;
+  gcomp_options_t * opts;
+  xz_pjob_t ** all;
+  unsigned made, max_jobs, max_inflight, inflight;
+  xz_pjob_t * free_list;
+  xz_pjob_t * cur;  /* being filled */
+  xz_pjob_t * pend; /* coded, going out */
+} xz_par_t;
+
+/* One variable-length integer out of a buffer; 0 when it is not there. */
+static int par_vli(const uint8_t * b, size_t n, size_t * pos, uint64_t * out) {
+  xz_vli_t v = {0, 0};
+  while (*pos < n) {
+    const int r = xz_vli_feed(&v, b[(*pos)++]);
+    if (r < 0) {
+      return 0;
+    }
+    if (r > 0) {
+      *out = v.value;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* Find the block, and its two sizes, in a stream of one block. */
+static gcomp_status_t par_cut(xz_pjob_t * j) {
+  const uint8_t * s = j->out;
+  size_t idx_size, idx_off, at = 1;
+  uint64_t count = 0;
+  if (j->out_len < XZ_STREAM_HEADER_SIZE + XZ_STREAM_FOOTER_SIZE + 8u) {
+    return GCOMP_ERR_INTERNAL;
+  }
+  idx_size = ((size_t)xz_get_le32(s + j->out_len - XZ_STREAM_FOOTER_SIZE + 4u) +
+                 1u) * 4u;
+  if (idx_size > j->out_len - XZ_STREAM_HEADER_SIZE - XZ_STREAM_FOOTER_SIZE) {
+    return GCOMP_ERR_INTERNAL;
+  }
+  idx_off = j->out_len - XZ_STREAM_FOOTER_SIZE - idx_size;
+  if (s[idx_off] != 0 ||
+      !par_vli(s + idx_off, idx_size, &at, &count) || count != 1 ||
+      !par_vli(s + idx_off, idx_size, &at, &j->unpadded) ||
+      !par_vli(s + idx_off, idx_size, &at, &j->unc) || j->unc != j->in_n) {
+    return GCOMP_ERR_INTERNAL;
+  }
+  j->blk_off = XZ_STREAM_HEADER_SIZE;
+  j->blk_len = idx_off - XZ_STREAM_HEADER_SIZE;
+  return GCOMP_OK;
+}
+
+static int par_run(void * ctx) {
+  xz_pjob_t * j = ctx;
+  size_t len = 0;
+  gcomp_status_t s = gcomp_encode_buffer(j->registry, "xz", j->opts, j->in,
+      j->in_n, j->out, j->out_cap, &len);
+  if (s == GCOMP_OK) {
+    j->out_len = len;
+    s = par_cut(j);
+  }
+  j->status = s;
+  return (int)s;
+}
+
+static void par_free_job(xz_enc_t * e, xz_pjob_t * j) {
+  if (j) {
+    gcomp_free(e->alloc, j->in);
+    gcomp_free(e->alloc, j->out);
+    gcomp_free(e->alloc, j);
+  }
+}
+
+static void par_give(xz_enc_t * e, xz_pjob_t * j) {
+  xz_par_t * p = e->par;
+  gcomp_free(e->alloc, j->out);
+  j->out = NULL;
+  j->out_cap = j->out_len = 0;
+  j->in_n = 0;
+  j->pos = 0;
+  j->next = p->free_list;
+  p->free_list = j;
+}
+
+static xz_pjob_t * par_take(xz_enc_t * e) {
+  xz_par_t * p = e->par;
+  xz_pjob_t * j = p->free_list;
+  if (j) {
+    p->free_list = j->next;
+    return j;
+  }
+  if (p->made == p->max_jobs) {
+    return NULL;
+  }
+  j = gcomp_calloc(e->alloc, 1, sizeof(*j));
+  if (!j) {
+    return NULL;
+  }
+  j->registry = e->registry;
+  j->opts = p->opts;
+  p->all[p->made++] = j;
+  return j;
+}
+
+/* Wait for every block out for coding and drop it. */
+static void par_abandon(xz_enc_t * e) {
+  xz_par_t * p = e->par;
+  while (p->inflight > 0) {
+    gcomp_block_job_t * base = NULL;
+    (void)gcomp_parallel_block_get_result(p->pb, &base);
+    if (!base) {
+      break;
+    }
+    p->inflight--;
+    par_give(e, (xz_pjob_t *)base);
+  }
+  if (p->pend) {
+    par_give(e, p->pend);
+    p->pend = NULL;
+  }
+  if (p->cur) {
+    par_give(e, p->cur);
+    p->cur = NULL;
+  }
+}
+
+static void par_destroy(xz_enc_t * e) {
+  xz_par_t * p = e->par;
+  unsigned i;
+  if (!p) {
+    return;
+  }
+  if (p->pb) {
+    par_abandon(e);
+    gcomp_parallel_block_wait(p->pb);
+    gcomp_parallel_block_destroy(p->pb);
+  }
+  for (i = 0; i < p->made; i++) {
+    par_free_job(e, p->all[i]);
+  }
+  gcomp_free(e->alloc, p->all);
+  gcomp_options_destroy(p->opts);
+  gcomp_free(e->alloc, p);
+  e->par = NULL;
+}
+
+/* Set the workers up, or leave `e->par` NULL for the in-line encoder: that is
+ * the answer for one thread, for no block size, and for a memory limit that
+ * could not hold two blocks. */
+static gcomp_status_t par_init(xz_enc_t * e, gcomp_options_t * options,
+    uint64_t threads) {
+  xz_par_t * p;
+  gcomp_parallel_block_config_t cfg;
+  gcomp_status_t s;
+  if (threads <= 1 || e->block_size == 0 || !options) {
+    return GCOMP_OK;
+  }
+  if (threads > 64) {
+    threads = 64;
+  }
+  if (e->max_memory != 0) {
+    /* A block in flight holds its input and its coded stream. */
+    const uint64_t per = e->block_size > UINT64_MAX / 4u
+        ? UINT64_MAX : e->block_size * 2u;
+    const uint64_t fit = e->max_memory / per;
+    if (fit < 2) {
+      return GCOMP_OK;
+    }
+    if (threads > fit - 1u) {
+      threads = fit - 1u;
+    }
+  }
+  p = gcomp_calloc(e->alloc, 1, sizeof(*p));
+  if (!p) {
+    return GCOMP_ERR_MEMORY;
+  }
+  e->par = p;
+  p->max_inflight = (unsigned)threads;
+  p->max_jobs = p->max_inflight + 2u;
+  p->all = gcomp_calloc(e->alloc, p->max_jobs, sizeof(*p->all));
+  s = gcomp_options_clone(options, &p->opts);
+  if (s == GCOMP_OK) {
+    s = gcomp_options_set_uint64(p->opts, "threads.count", 1);
+  }
+  if (s == GCOMP_OK) {
+    s = gcomp_options_set_uint64(p->opts, "xz.block_size", 0);
+  }
+  if (!p->all || s != GCOMP_OK) {
+    return s != GCOMP_OK ? s : GCOMP_ERR_MEMORY;
+  }
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.allocator = e->alloc;
+  cfg.num_threads = (uint32_t)threads;
+  cfg.max_in_flight = (uint32_t)threads;
+  return gcomp_parallel_block_create(&cfg, &p->pb);
+}
+
+static gcomp_status_t par_fail(gcomp_encoder_t * encoder, gcomp_status_t s) {
+  return gcomp_encoder_set_error(encoder,
+      s == GCOMP_OK ? GCOMP_ERR_INTERNAL : s, "xz: a block could not be coded");
+}
+
+/* Take the next coded block, waiting for it. `pend` is empty. */
+static gcomp_status_t par_collect(gcomp_encoder_t * encoder, xz_enc_t * e) {
+  xz_par_t * p = e->par;
+  gcomp_block_job_t * base = NULL;
+  xz_pjob_t * j;
+  gcomp_status_t s = gcomp_parallel_block_get_result(p->pb, &base);
+  if (!base) {
+    return par_fail(encoder, s);
+  }
+  j = (xz_pjob_t *)base;
+  p->inflight--;
+  if (j->status != GCOMP_OK) {
+    s = j->status;
+    par_give(e, j);
+    return par_fail(encoder, s);
+  }
+  s = push_record(e, j->unpadded, j->unc);
+  if (s != GCOMP_OK) {
+    par_give(e, j);
+    return gcomp_encoder_set_error(encoder, s, s == GCOMP_ERR_LIMIT
+            ? "xz: the index exceeds limits.max_memory_bytes"
+            : "xz: out of memory for the index");
+  }
+  j->pos = 0;
+  p->pend = j;
+  return GCOMP_OK;
+}
+
+/* Hand the block being filled to a worker. There is room for it. */
+static gcomp_status_t par_submit(gcomp_encoder_t * encoder, xz_enc_t * e) {
+  xz_par_t * p = e->par;
+  xz_pjob_t * j = p->cur;
+  size_t cap = 0;
+  gcomp_status_t s = gcomp_encode_bound(e->registry, "xz", p->opts, j->in_n, &cap);
+  if (s != GCOMP_OK) {
+    return par_fail(encoder, s);
+  }
+  j->out = gcomp_malloc(e->alloc, cap);
+  if (!j->out) {
+    return gcomp_encoder_set_error(
+        encoder, GCOMP_ERR_MEMORY, "xz: out of memory for a block");
+  }
+  j->out_cap = cap;
+  j->base.input = j->in;
+  j->base.input_size = j->in_n;
+  p->cur = NULL;
+  s = gcomp_parallel_block_try_submit(p->pb, j, par_run);
+  if (s != GCOMP_OK) {
+    par_give(e, j);
+    return par_fail(encoder, s);
+  }
+  p->inflight++;
+  return GCOMP_OK;
+}
+
+/* Send the going-out block to the caller. 1: it is all gone. */
+static int par_drain_pend(xz_enc_t * e, gcomp_buffer_t * out) {
+  xz_par_t * p = e->par;
+  xz_pjob_t * j = p->pend;
+  size_t room = out->size - out->used, n = j->blk_len - j->pos;
+  if (n > room) {
+    n = room;
+  }
+  if (n != 0) {
+    memcpy((uint8_t *)out->data + out->used, j->out + j->blk_off + j->pos, n);
+    out->used += n;
+    j->pos += n;
+  }
+  if (j->pos < j->blk_len) {
+    return 0;
+  }
+  p->pend = NULL;
+  par_give(e, j);
+  return 1;
+}
+
+static gcomp_status_t par_update(gcomp_encoder_t * encoder, xz_enc_t * e,
+    gcomp_buffer_t * input, gcomp_buffer_t * output) {
+  xz_par_t * p = e->par;
+  for (;;) {
+    gcomp_status_t s;
+    size_t take;
+    xz_pjob_t * j;
+    drain(e, output);
+    if (e->qlen != 0) {
+      return GCOMP_OK;
+    }
+    if (p->pend) {
+      if (!par_drain_pend(e, output)) {
+        return GCOMP_OK;
+      }
+      continue;
+    }
+    if (!e->header_done) {
+      queue_stream_header(e);
+      e->header_done = 1;
+      continue;
+    }
+    if (p->inflight > 0 && gcomp_parallel_block_result_ready(p->pb)) {
+      s = par_collect(encoder, e);
+      if (s != GCOMP_OK) {
+        return s;
+      }
+      continue;
+    }
+    if (p->cur && p->cur->in_n == e->block_size) {
+      s = p->inflight >= p->max_inflight ? par_collect(encoder, e)
+                                         : par_submit(encoder, e);
+      if (s != GCOMP_OK) {
+        return s;
+      }
+      continue;
+    }
+    if (input->used >= input->size) {
+      return GCOMP_OK;
+    }
+    if (!p->cur) {
+      p->cur = par_take(e);
+      if (!p->cur) {
+        if (p->inflight == 0) {
+          return gcomp_encoder_set_error(encoder, GCOMP_ERR_MEMORY,
+              "xz: out of memory for a block");
+        }
+        s = par_collect(encoder, e);
+        if (s != GCOMP_OK) {
+          return s;
+        }
+        continue;
+      }
+    }
+    j = p->cur;
+    take = input->size - input->used;
+    if (take > e->block_size - j->in_n) {
+      take = (size_t)(e->block_size - j->in_n);
+    }
+    if (j->in_n + take > j->in_cap) {
+      size_t cap = j->in_cap ? j->in_cap * 2u : 65536u;
+      uint8_t * grown;
+      while (cap < j->in_n + take) {
+        cap *= 2u;
+      }
+      if (cap > e->block_size) {
+        cap = (size_t)e->block_size;
+      }
+      grown = gcomp_realloc(e->alloc, j->in, cap);
+      if (!grown) {
+        return gcomp_encoder_set_error(encoder, GCOMP_ERR_MEMORY,
+            "xz: out of memory for a block");
+      }
+      j->in = grown;
+      j->in_cap = cap;
+    }
+    memcpy(j->in + j->in_n, (const uint8_t *)input->data + input->used, take);
+    j->in_n += take;
+    input->used += take;
+  }
+}
+
+/* Get every block out: the one being filled, those being coded, the one
+ * going out. ::GCOMP_ERR_LIMIT: the output filled; call again. */
+static gcomp_status_t par_flush_all(gcomp_encoder_t * encoder, xz_enc_t * e,
+    gcomp_buffer_t * output) {
+  xz_par_t * p = e->par;
+  for (;;) {
+    gcomp_status_t s;
+    drain(e, output);
+    if (e->qlen != 0) {
+      return GCOMP_ERR_LIMIT;
+    }
+    if (p->pend) {
+      if (!par_drain_pend(e, output)) {
+        return GCOMP_ERR_LIMIT;
+      }
+      continue;
+    }
+    if (p->cur && p->cur->in_n > 0) {
+      s = p->inflight >= p->max_inflight ? par_collect(encoder, e)
+                                         : par_submit(encoder, e);
+    }
+    else if (p->inflight > 0) {
+      s = par_collect(encoder, e);
+    }
+    else {
+      return GCOMP_OK;
+    }
+    if (s != GCOMP_OK) {
+      return s;
+    }
+  }
+}
 
 /* ---- closing a block ---------------------------------------------------- */
 
@@ -429,6 +870,9 @@ gcomp_status_t xz_encoder_update(gcomp_encoder_t * encoder,
   if (e->finished || e->tail_built) {
     return gcomp_encoder_set_error(
         encoder, GCOMP_ERR_INVALID_ARG, "xz: encoder update after finish");
+  }
+  if (e->par) {
+    return par_update(encoder, e, input, output);
   }
   for (;;) {
     size_t avail, take;
@@ -545,6 +989,12 @@ gcomp_status_t xz_encoder_finish(
     if (e->finished) {
       return GCOMP_OK;
     }
+    if (e->par && !e->tail_built) {
+      s = par_flush_all(encoder, e, output);
+      if (s != GCOMP_OK) {
+        return s;
+      }
+    }
     if (e->block_open) {
       e->closing = 1;
       s = close_block(encoder, e, output);
@@ -586,6 +1036,9 @@ gcomp_status_t xz_encoder_flush(
     return gcomp_encoder_set_error(
         encoder, GCOMP_ERR_INVALID_ARG, "xz: encoder cannot flush after finish");
   }
+  if (e->par) {
+    return par_flush_all(encoder, e, output);
+  }
   for (;;) {
     gcomp_status_t s;
     drain(e, output);
@@ -610,6 +1063,9 @@ gcomp_status_t xz_encoder_reset(gcomp_encoder_t * encoder) {
     return GCOMP_ERR_INVALID_ARG;
   }
   e = encoder->method_state;
+  if (e->par) {
+    par_abandon(e);
+  }
   s = xz_chain_reset(&e->chain);
   if (s != GCOMP_OK) {
     return s;

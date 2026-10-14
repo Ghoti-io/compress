@@ -174,6 +174,11 @@ gcomp_status_t xz_decoder_finish(
     gcomp_decoder_t * decoder, gcomp_buffer_t * output);
 gcomp_status_t xz_decoder_reset(gcomp_decoder_t * decoder);
 
+/** The whole-buffer decode with threads; see xz_decode_par.c. */
+gcomp_status_t xz_decode_parallel(gcomp_registry_t * registry,
+    gcomp_options_t * options, const void * input, size_t input_size,
+    void * output, size_t output_capacity, size_t * output_size_out);
+
 #ifdef __cplusplus
 }
 #endif
