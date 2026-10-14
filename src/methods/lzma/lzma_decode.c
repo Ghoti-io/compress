@@ -88,6 +88,22 @@ typedef struct lzma_sym_s {
   uint8_t byte;
 } lzma_sym_t;
 
+/* What parsing a symbol reads of the decoder, gathered in one place so that
+ * the fast loop can hold it in registers: the loop writes bytes through
+ * pointers that may alias anything, so fields read through the decoder would
+ * be loaded again after every one. */
+typedef struct lzma_view_s {
+  lzma_probs_t * probs;
+  const uint16_t * lit;
+  const uint8_t * buf;
+  size_t pos, cap;
+  uint64_t total;
+  unsigned state;
+  uint32_t rep0;
+  unsigned lc, lp, pb;
+  unsigned prev; /* the byte just written; 0 before there is one */
+} lzma_view_t;
+
 typedef enum {
   RUN_NEED_INPUT,
   RUN_NEED_OUTPUT,
@@ -147,6 +163,51 @@ static inline void rc_norm(lzma_rc_t * rc, int dry) {
  * a thirty-second of the distance to 2048 and a 1 moves it down by a
  * thirty-second of itself, so both are a thirty-second of something, added or
  * taken away (t ^ mask) - mask being t or -t. */
+#if defined(__x86_64__) && defined(__GNUC__)
+/* The same bit with its three outcomes (range, code, probability) chosen by
+ * conditional moves written out. The portable form below is the same
+ * arithmetic, and a compiler is free to turn it into a branch: on this
+ * stream's bits, a branch is wrong as often as it is right, and costs more
+ * than the moves. */
+static inline unsigned rc_bit(lzma_rc_t * rc, uint16_t * prob, int dry) {
+  const uint32_t p = *prob;
+  const uint32_t range = rc->range;
+  const uint32_t code = rc->code;
+  const uint32_t bound = (range >> LZMA_PROB_BITS) * p;
+  uint32_t r_out = bound, c_out = code, bit;
+  const uint32_t tr = range - bound, tc = code - bound;
+  if (dry) {
+    __asm__("cmp %[bound], %[code]\n\t"
+            "cmovae %[tr], %[r_out]\n\t"
+            "cmovae %[tc], %[c_out]\n\t"
+            "setae %b[bit]\n\t"
+            "movzbl %b[bit], %[bit]"
+        : [r_out] "+r"(r_out), [c_out] "+r"(c_out), [bit] "=&q"(bit)
+        : [bound] "r"(bound), [code] "r"(code), [tr] "r"(tr), [tc] "r"(tc)
+        : "cc");
+  }
+  else {
+    uint32_t p_out = p + ((LZMA_PROB_ONE - p) >> LZMA_MOVE_BITS);
+    const uint32_t p1 = p - (p >> LZMA_MOVE_BITS);
+    __asm__("cmp %[bound], %[code]\n\t"
+            "cmovae %[tr], %[r_out]\n\t"
+            "cmovae %[tc], %[c_out]\n\t"
+            "cmovae %[p1], %[p_out]\n\t"
+            "setae %b[bit]\n\t"
+            "movzbl %b[bit], %[bit]"
+        : [r_out] "+r"(r_out), [c_out] "+r"(c_out), [p_out] "+r"(p_out),
+          [bit] "=&q"(bit)
+        : [bound] "r"(bound), [code] "r"(code), [tr] "r"(tr), [tc] "r"(tc),
+          [p1] "r"(p1)
+        : "cc");
+    *prob = (uint16_t)p_out;
+  }
+  rc->range = r_out;
+  rc->code = c_out;
+  rc_norm(rc, dry);
+  return bit;
+}
+#else
 static inline unsigned rc_bit(lzma_rc_t * rc, uint16_t * prob, int dry) {
   uint32_t p = *prob;
   uint32_t bound = (rc->range >> LZMA_PROB_BITS) * p;
@@ -161,6 +222,65 @@ static inline unsigned rc_bit(lzma_rc_t * rc, uint16_t * prob, int dry) {
   rc_norm(rc, dry);
   return (unsigned)(mask & 1u);
 }
+
+#endif
+
+/* One bit of a tree walk: m becomes (m << 1) | bit. On x86-64 the shift and
+ * the bit come out of the same compare the conditional moves use, instead of
+ * a separate set, widen, shift and or. */
+#if defined(__x86_64__) && defined(__GNUC__)
+static inline unsigned rc_bitm(
+    lzma_rc_t * rc, uint16_t * prob, unsigned m, int dry) {
+  const uint32_t p = *prob;
+  const uint32_t range = rc->range;
+  const uint32_t code = rc->code;
+  const uint32_t bound = (range >> LZMA_PROB_BITS) * p;
+  uint32_t r_out = bound, c_out = code, tr, tc;
+  unsigned m2;
+  if (dry) {
+    __asm__("mov %[range], %[tr]\n\t"
+            "sub %[bound], %[tr]\n\t"
+            "mov %[code], %[tc]\n\t"
+            "sub %[bound], %[tc]\n\t"
+            "cmovae %[tr], %[r_out]\n\t"
+            "cmovae %[tc], %[c_out]\n\t"
+            "lea 1(%q[m],%q[m]), %[m2]\n\t"
+            "sbb $0, %[m2]"
+        : [r_out] "+r"(r_out), [c_out] "+r"(c_out), [tr] "=&r"(tr),
+          [tc] "=&r"(tc), [m2] "=&r"(m2)
+        : [bound] "r"(bound), [code] "r"(code), [range] "r"(range), [m] "r"(m)
+        : "cc");
+  }
+  else {
+    uint32_t p_out = p + ((LZMA_PROB_ONE - p) >> LZMA_MOVE_BITS);
+    const uint32_t p1 = p - (p >> LZMA_MOVE_BITS);
+    __asm__("mov %[range], %[tr]\n\t"
+            "sub %[bound], %[tr]\n\t"
+            "mov %[code], %[tc]\n\t"
+            "sub %[bound], %[tc]\n\t"
+            "cmovae %[tr], %[r_out]\n\t"
+            "cmovae %[tc], %[c_out]\n\t"
+            "cmovae %[p1], %[p_out]\n\t"
+            "lea 1(%q[m],%q[m]), %[m2]\n\t"
+            "sbb $0, %[m2]"
+        : [r_out] "+r"(r_out), [c_out] "+r"(c_out), [p_out] "+r"(p_out),
+          [tr] "=&r"(tr), [tc] "=&r"(tc), [m2] "=&r"(m2)
+        : [bound] "r"(bound), [code] "r"(code), [range] "r"(range),
+          [m] "r"(m), [p1] "r"(p1)
+        : "cc");
+    *prob = (uint16_t)p_out;
+  }
+  rc->range = r_out;
+  rc->code = c_out;
+  rc_norm(rc, dry);
+  return m2;
+}
+#else
+static inline unsigned rc_bitm(
+    lzma_rc_t * rc, uint16_t * prob, unsigned m, int dry) {
+  return (m << 1) | rc_bit(rc, prob, dry);
+}
+#endif
 
 static inline uint32_t rc_direct(lzma_rc_t * rc, unsigned count, int dry) {
   uint32_t res = 0;
@@ -181,7 +301,7 @@ static inline unsigned bit_tree(
   unsigned m = 1;
   unsigned i;
   for (i = 0; i < bits; i++) {
-    m = (m << 1) | rc_bit(rc, probs + m, dry);
+    m = rc_bitm(rc, probs + m, m, dry);
   }
   return m - (1u << bits);
 }
@@ -203,6 +323,15 @@ static inline unsigned bit_tree_reverse(
 
 /* The byte `dist` back, 1 being the one just written. Zero before there is
  * one, which is what the literal coder's context expects of an empty window. */
+static inline uint8_t view_byte(const lzma_view_t * v, uint64_t dist) {
+  size_t p;
+  if (dist > v->total || v->cap == 0) {
+    return 0;
+  }
+  p = v->pos >= dist ? v->pos - (size_t)dist : v->pos + v->cap - (size_t)dist;
+  return v->buf[p];
+}
+
 static inline uint8_t dict_byte(const lzma_dec_t * d, uint64_t dist) {
   size_t p;
   if (dist > d->total || d->cap == 0) {
@@ -331,23 +460,23 @@ static inline uint32_t parse_dist(
 /* Decode one symbol from rc. With dry set nothing but rc is written, so the
  * same code answers "is the whole symbol here" and "what is it". */
 static inline __attribute__((always_inline)) void parse_body(
-    lzma_dec_t * d, lzma_rc_t * rc, lzma_sym_t * s, int dry) {
-  lzma_probs_t * P = &d->probs;
-  unsigned state = d->state;
-  unsigned pos_state = (unsigned)d->total & ((1u << d->pb) - 1u);
+    const lzma_view_t * v, lzma_rc_t * rc, lzma_sym_t * s, int dry) {
+  lzma_probs_t * P = v->probs;
+  unsigned state = v->state;
+  unsigned pos_state = (unsigned)v->total & ((1u << v->pb) - 1u);
   unsigned len;
 
   if (!rc_bit(rc, &P->is_match[state][pos_state], dry)) {
-    unsigned prev = dict_byte(d, 1);
-    size_t ctx = ((size_t)d->total & (((size_t)1 << d->lp) - 1u)) << d->lc;
+    unsigned prev = v->prev;
+    size_t ctx = ((size_t)v->total & (((size_t)1 << v->lp) - 1u)) << v->lc;
     uint16_t * probs;
     unsigned symbol = 1;
-    ctx += prev >> (8u - d->lc);
-    probs = d->lit + (size_t)LZMA_LIT_CODER * ctx;
+    ctx += prev >> (8u - v->lc);
+    probs = (uint16_t *)v->lit + (size_t)LZMA_LIT_CODER * ctx;
     if (state >= LZMA_LIT_STATES) {
       /* After a match the literal is coded against the byte the last
        * distance points at, until the two first differ. */
-      unsigned match_byte = dict_byte(d, (uint64_t)d->rep[0] + 1u);
+      unsigned match_byte = view_byte(v, (uint64_t)v->rep0 + 1u);
       do {
         unsigned match_bit = (match_byte >> 7) & 1u;
         unsigned bit;
@@ -359,8 +488,19 @@ static inline __attribute__((always_inline)) void parse_body(
         }
       } while (symbol < 0x100u);
     }
+    if (symbol == 1u) {
+      /* A plain literal is eight bits, so eight steps with no loop test. */
+      symbol = rc_bitm(rc, &probs[symbol], symbol, dry);
+      symbol = rc_bitm(rc, &probs[symbol], symbol, dry);
+      symbol = rc_bitm(rc, &probs[symbol], symbol, dry);
+      symbol = rc_bitm(rc, &probs[symbol], symbol, dry);
+      symbol = rc_bitm(rc, &probs[symbol], symbol, dry);
+      symbol = rc_bitm(rc, &probs[symbol], symbol, dry);
+      symbol = rc_bitm(rc, &probs[symbol], symbol, dry);
+      symbol = rc_bitm(rc, &probs[symbol], symbol, dry);
+    }
     while (symbol < 0x100u) {
-      symbol = (symbol << 1) | rc_bit(rc, &probs[symbol], dry);
+      symbol = rc_bitm(rc, &probs[symbol], symbol, dry);
     }
     s->kind = SYM_LIT;
     s->byte = (uint8_t)symbol;
@@ -399,10 +539,230 @@ static inline __attribute__((always_inline)) void parse_body(
  * the compiler keep its range, code and input pointer in registers across the
  * dozens of bits one symbol takes instead of loading and storing them through
  * the caller's struct at every bit. */
+static inline void view_of(const lzma_dec_t * d, lzma_view_t * v) {
+  v->probs = (lzma_probs_t *)&d->probs;
+  v->lit = d->lit;
+  v->buf = d->buf;
+  v->pos = d->pos;
+  v->cap = d->cap;
+  v->total = d->total;
+  v->state = d->state;
+  v->rep0 = d->rep[0];
+  v->lc = d->lc;
+  v->lp = d->lp;
+  v->pb = d->pb;
+  v->prev = view_byte(v, 1);
+}
+
 static void parse(lzma_dec_t * d, lzma_rc_t * rc, lzma_sym_t * s, int dry) {
   lzma_rc_t local = *rc;
-  parse_body(d, &local, s, dry);
+  lzma_view_t v;
+  view_of(d, &v);
+  parse_body(&v, &local, s, dry);
   *rc = local;
+}
+
+/* ---- the fast loop ------------------------------------------------------ */
+
+/* Copy n (at least 2) bytes between regions that do not overlap, with fixed
+ * size moves and no call: chunks of sixteen and a last chunk laid over the end
+ * of the run, which rewrites bytes already written with the same values, or
+ * for a short run two moves that meet or overlap in the middle. Not a byte is
+ * written beyond the run. */
+static inline void copy_exact(uint8_t * dst, const uint8_t * src, size_t n) {
+  if (n >= 16) {
+    size_t i = 0;
+    for (; i + 16u <= n; i += 16) {
+      memcpy(dst + i, src + i, 16);
+    }
+    if (i < n) {
+      memcpy(dst + n - 16, src + n - 16, 16);
+    }
+  }
+  else if (n >= 8) {
+    memcpy(dst, src, 8);
+    memcpy(dst + n - 8, src + n - 8, 8);
+  }
+  else if (n >= 4) {
+    memcpy(dst, src, 4);
+    memcpy(dst + n - 4, src + n - 4, 4);
+  }
+  else {
+    memcpy(dst, src, 2);
+    memcpy(dst + n - 2, src + n - 2, 2);
+  }
+}
+
+/* Copy n bytes from dist behind dst to dst, forward, so that a distance
+ * shorter than n repeats the bytes just written. */
+static inline void copy_back(uint8_t * dst, size_t dist, size_t n) {
+  const uint8_t * src = dst - dist;
+  if (dist >= n) {
+    copy_exact(dst, src, n);
+  }
+  else if (dist >= 16) {
+    /* Each chunk's source is wholly behind its destination; the last chunk is
+     * laid over the end of the run, reading bytes that are already final. */
+    size_t i = 0;
+    for (; i + 16u <= n; i += 16) {
+      memcpy(dst + i, src + i, 16);
+    }
+    if (i < n) {
+      memcpy(dst + n - 16, src + n - 16, 16);
+    }
+  }
+  else {
+    size_t i;
+    for (i = 0; i < n; i++) {
+      dst[i] = src[i];
+    }
+  }
+}
+
+/* Decode symbols in a loop, with the decoder's hot fields in locals, for as
+ * long as nothing can go short: a whole symbol's input (LZMA_REQUIRED_INPUT_MAX
+ * bytes) in hand, room for the longest match in both the caller's buffer and
+ * the window, and that much left to produce. Under those a match is neither
+ * partial nor wrapped, so it is two chunked copies and no checks.
+ *
+ * It stops when a condition fails, which is the ordinary path's to deal with,
+ * and when a symbol is not one it applies: an end marker, a distance beyond
+ * what has been written, or a source that wraps round the window. That symbol
+ * has been read, and reading it moved the probabilities, so it cannot be put
+ * back; it is handed on in `s` for the ordinary path to apply, and the return
+ * is 1. Otherwise 0. */
+static int core_fast(lzma_dec_t * d, const uint8_t ** inp, const uint8_t * in_end,
+    uint8_t * out, size_t * out_used, size_t out_size, uint64_t * leftp,
+    lzma_rc_t * rcp, lzma_sym_t * sp) {
+  lzma_view_t v;
+  lzma_rc_t rc;
+  const uint8_t * const in_lim = in_end - LZMA_REQUIRED_INPUT_MAX;
+  uint8_t * const buf = d->buf;
+  const size_t cap = d->cap;
+  const uint32_t window = d->window;
+  size_t pos = d->pos, o = *out_used;
+  uint64_t total = d->total, left = *leftp;
+  unsigned state = d->state;
+  uint32_t rep0 = d->rep[0], rep1 = d->rep[1], rep2 = d->rep[2],
+           rep3 = d->rep[3];
+  int pending = 0;
+  /* The window position, the caller's buffer and the count left to produce
+   * all advance by exactly the bytes a symbol writes, so one limit on the
+   * position stands for all three: no more than the least of the room in each
+   * may be used, less the longest match. */
+  size_t slack = cap - pos;
+  size_t pos_lim;
+  if (out_size - o < slack) {
+    slack = out_size - o;
+  }
+  if (left < slack) {
+    slack = (size_t)left;
+  }
+  if (pos == 0) {
+    slack = 0; /* nothing before it to be the previous byte; one ordinary step first */
+  }
+  pos_lim = slack >= LZMA_MATCH_MAX ? pos + (slack - LZMA_MATCH_MAX) : 0;
+
+  view_of(d, &v);
+  rc.range = d->range;
+  rc.code = d->code;
+  rc.in = *inp;
+  rc.in_end = in_end;
+  rc.starved = 0;
+  while (slack >= LZMA_MATCH_MAX && rc.in <= in_lim && pos <= pos_lim) {
+    lzma_sym_t s = {0};
+    v.pos = pos;
+    v.total = total;
+    v.state = state;
+    v.rep0 = rep0;
+    v.prev = buf[pos - 1u];
+    parse_body(&v, &rc, &s, 0);
+    if (s.kind == SYM_LIT) {
+      buf[pos] = s.byte;
+      out[o] = s.byte;
+      pos++;
+      o++;
+      total++;
+      left--;
+      state = lzma_state_literal(state);
+      continue;
+    }
+    if (s.kind == SYM_SHORTREP) {
+      if ((uint64_t)rep0 >= total || pos <= rep0) {
+        *sp = s;
+        pending = 1;
+        break;
+      }
+      s.byte = buf[pos - rep0 - 1u];
+      buf[pos] = s.byte;
+      out[o] = s.byte;
+      pos++;
+      o++;
+      total++;
+      left--;
+      state = lzma_state_short_rep(state);
+      continue;
+    }
+    {
+      uint32_t dist;
+      size_t n;
+      if (s.kind == SYM_MATCH) {
+        dist = s.dist;
+        if (dist == LZMA_EOS_DISTANCE || (uint64_t)dist >= total ||
+            dist >= window || pos <= dist) {
+          *sp = s;
+          pending = 1;
+          break;
+        }
+        rep3 = rep2;
+        rep2 = rep1;
+        rep1 = rep0;
+        rep0 = dist;
+        state = lzma_state_match(state);
+      }
+      else {
+        dist = s.rep == 0 ? rep0 : s.rep == 1 ? rep1 : s.rep == 2 ? rep2 : rep3;
+        if ((uint64_t)dist >= total || pos <= dist) {
+          *sp = s;
+          pending = 1;
+          break;
+        }
+        if (s.rep == 1) {
+          rep1 = rep0;
+        }
+        else if (s.rep == 2) {
+          rep2 = rep1;
+          rep1 = rep0;
+        }
+        else if (s.rep == 3) {
+          rep3 = rep2;
+          rep2 = rep1;
+          rep1 = rep0;
+        }
+        rep0 = dist;
+        state = lzma_state_rep(state);
+      }
+      n = s.len;
+      copy_back(buf + pos, (size_t)dist + 1u, n);
+      copy_exact(out + o, buf + pos, n);
+      pos += n;
+      o += n;
+      total += n;
+      left -= n;
+    }
+  }
+  d->pos = pos;
+  d->total = total;
+  d->state = state;
+  d->rep[0] = rep0;
+  d->rep[1] = rep1;
+  d->rep[2] = rep2;
+  d->rep[3] = rep3;
+  *inp = rc.in;
+  *out_used = o;
+  *leftp = left;
+  *rcp = rc;
+  return pending;
 }
 
 /* ---- the core: parse, apply, and the streaming around it ---------------- */
@@ -539,6 +899,24 @@ static lzma_run_t core_run(lzma_dec_t * d, const uint8_t ** inp,
     }
 
     avail = (size_t)(in_end - in);
+    if (d->carry_len == 0 && d->remain_len == 0 &&
+        avail >= LZMA_REQUIRED_INPUT_MAX) {
+      /* The fast loop takes as many whole symbols as it can. If it has
+       * handed one back it is applied below, as if just parsed; if it only
+       * ran out of its conditions, the ordinary path takes one step. */
+      const uint8_t * before = in;
+      const int pending = core_fast(
+          d, &in, in_end, out, out_used, out_size, &left, &rc, &s);
+      d->range = rc.range;
+      d->code = rc.code;
+      room = out_size - *out_used;
+      if (pending) {
+        goto apply;
+      }
+      if (in != before) {
+        continue;
+      }
+    }
     if (d->carry_len == 0 && avail >= LZMA_REQUIRED_INPUT_MAX) {
       rc.range = d->range;
       rc.code = d->code;
@@ -601,6 +979,7 @@ static lzma_run_t core_run(lzma_dec_t * d, const uint8_t ** inp,
     d->range = rc.range;
     d->code = rc.code;
 
+  apply:
     if (left == 0 && !(s.kind == SYM_MATCH && s.dist == LZMA_EOS_DISTANCE)) {
       /* The declared size is spent and the stream goes on with something
        * other than the marker that may follow it. */

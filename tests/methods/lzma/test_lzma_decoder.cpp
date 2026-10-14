@@ -18,6 +18,7 @@
 
 #include "lzma_oracle.h"
 #include "test_helpers.h"
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <ghoti.io/compress/compress.h>
@@ -346,12 +347,21 @@ TEST_F(LzmaDecoderTest, HonoursADeclaredSizeAndAMarkerAfterIt) {
   EXPECT_EQ(Decode("lzma", in, out, in.size(), data.size() + 10),
       GCOMP_ERR_CORRUPT);
 
-  /* A size smaller than the data: the stream goes on past it. */
-  for (int i = 0; i < 8; i++) {
-    in[5 + i] = (uint8_t)((uint64_t)(data.size() - 1) >> (8 * i));
+  /* A size smaller than the data: the stream goes on past it. Cut at the end,
+   * where little input is left, and well before it, where the decoder has a
+   * long run of input in hand and must still stop at the size, in the middle
+   * of a match if that is where it falls. */
+  for (size_t cut : {size_t(1), size_t(7), size_t(100), size_t(1000),
+           size_t(5000), size_t(20000)}) {
+    const uint64_t size = data.size() - cut;
+    for (int i = 0; i < 8; i++) {
+      in[5 + i] = (uint8_t)(size >> (8 * i));
+    }
+    EXPECT_EQ(Decode("lzma", in, out, in.size(), data.size() + 10),
+        GCOMP_ERR_CORRUPT) << cut;
+    EXPECT_LE(out.size(), size) << "wrote past the declared size, cut " << cut;
+    EXPECT_TRUE(std::equal(out.begin(), out.end(), data.begin())) << cut;
   }
-  EXPECT_EQ(Decode("lzma", in, out, in.size(), data.size() + 10),
-      GCOMP_ERR_CORRUPT);
 }
 
 /**
