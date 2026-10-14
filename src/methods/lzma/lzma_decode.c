@@ -225,6 +225,29 @@ static inline unsigned rc_bit(lzma_rc_t * rc, uint16_t * prob, int dry) {
 
 #endif
 
+static inline unsigned rc_bit_br(lzma_rc_t * rc, uint16_t * prob, int dry) {
+  uint32_t p = *prob;
+  uint32_t bound = (rc->range >> LZMA_PROB_BITS) * p;
+  unsigned bit;
+  if (rc->code < bound) {
+    rc->range = bound;
+    if (!dry) {
+      *prob = (uint16_t)(p + ((LZMA_PROB_ONE - p) >> LZMA_MOVE_BITS));
+    }
+    bit = 0;
+  }
+  else {
+    rc->range -= bound;
+    rc->code -= bound;
+    if (!dry) {
+      *prob = (uint16_t)(p - (p >> LZMA_MOVE_BITS));
+    }
+    bit = 1;
+  }
+  rc_norm(rc, dry);
+  return bit;
+}
+
 /* One bit of a tree walk: m becomes (m << 1) | bit. On x86-64 the shift and
  * the bit come out of the same compare the conditional moves use, instead of
  * a separate set, widen, shift and or. */
@@ -425,10 +448,10 @@ static inline int dict_copy_run(
 
 static inline unsigned parse_len(lzma_rc_t * rc, lzma_len_probs_t * l,
     unsigned pos_state, int dry) {
-  if (!rc_bit(rc, &l->choice, dry)) {
+  if (!rc_bit_br(rc, &l->choice, dry)) {
     return bit_tree(rc, l->low[pos_state], LZMA_LEN_LOW_BITS, dry);
   }
-  if (!rc_bit(rc, &l->choice2, dry)) {
+  if (!rc_bit_br(rc, &l->choice2, dry)) {
     return LZMA_LEN_LOW_SYMBOLS +
         bit_tree(rc, l->mid[pos_state], LZMA_LEN_MID_BITS, dry);
   }
@@ -466,7 +489,7 @@ static inline __attribute__((always_inline)) void parse_body(
   unsigned pos_state = (unsigned)v->total & ((1u << v->pb) - 1u);
   unsigned len;
 
-  if (!rc_bit(rc, &P->is_match[state][pos_state], dry)) {
+  if (!rc_bit_br(rc, &P->is_match[state][pos_state], dry)) {
     unsigned prev = v->prev;
     size_t ctx = ((size_t)v->total & (((size_t)1 << v->lp) - 1u)) << v->lc;
     uint16_t * probs;
@@ -507,7 +530,7 @@ static inline __attribute__((always_inline)) void parse_body(
     return;
   }
 
-  if (!rc_bit(rc, &P->is_rep[state], dry)) {
+  if (!rc_bit_br(rc, &P->is_rep[state], dry)) {
     len = parse_len(rc, &P->len, pos_state, dry);
     s->kind = SYM_MATCH;
     s->dist = parse_dist(rc, P, len, dry);
@@ -515,8 +538,8 @@ static inline __attribute__((always_inline)) void parse_body(
     return;
   }
 
-  if (!rc_bit(rc, &P->is_rep_g0[state], dry)) {
-    if (!rc_bit(rc, &P->is_rep0_long[state][pos_state], dry)) {
+  if (!rc_bit_br(rc, &P->is_rep_g0[state], dry)) {
+    if (!rc_bit_br(rc, &P->is_rep0_long[state][pos_state], dry)) {
       s->kind = SYM_SHORTREP;
       s->len = 1;
       s->rep = 0;
@@ -524,11 +547,11 @@ static inline __attribute__((always_inline)) void parse_body(
     }
     s->rep = 0;
   }
-  else if (!rc_bit(rc, &P->is_rep_g1[state], dry)) {
+  else if (!rc_bit_br(rc, &P->is_rep_g1[state], dry)) {
     s->rep = 1;
   }
   else {
-    s->rep = 2u + rc_bit(rc, &P->is_rep_g2[state], dry);
+    s->rep = 2u + rc_bit_br(rc, &P->is_rep_g2[state], dry);
   }
   len = parse_len(rc, &P->rep_len, pos_state, dry);
   s->kind = SYM_REP;
