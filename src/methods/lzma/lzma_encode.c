@@ -953,6 +953,29 @@ static unsigned bt_step(lzma_enc_t * e, size_t idx, unsigned lim, unsigned avail
   uint32_t * ptr0 = ptr1 + 1;
   unsigned len0 = 0, len1 = 0, best = 1, last = 1, np = 0;
   unsigned depth = e->bt_depth;
+  /* The farthest a candidate may be: the dictionary, the ring (a node is kept
+   * in the slot of its position modulo the ring) and the history. One unsigned
+   * compare of d - 1 against it also refuses d == 0 and a wrapped d. */
+  uint32_t reach = e->dict_size < mask ? e->dict_size : mask;
+  if (hist < reach) {
+    reach = (uint32_t)hist;
+  }
+
+  /* The tables are far larger than the cache and the walk below is a chain of
+   * dependent loads, so ask ahead for what the next positions will touch: the
+   * head slot of one sixteen on, and, read from the slot of one eight on, the
+   * node and the bytes its candidate points at. */
+  if (idx + 20u <= e->win_len) {
+    uint32_t hint;
+    __builtin_prefetch(&e->head[hash4(p + 16, e->head_bits)]);
+    hint = e->head[hash4(p + 8, e->head_bits)];
+    if (hint != 0) {
+      __builtin_prefetch(son + 2u * ((hint - 1u) & mask));
+      if (hint > e->base) {
+        __builtin_prefetch(e->win + (hint - e->base - 1u));
+      }
+    }
+  }
 
   e->head[h4] = cur;
   e->head3[hash3(p)] = cur;
@@ -988,8 +1011,7 @@ static unsigned bt_step(lzma_enc_t * e, size_t idx, unsigned lim, unsigned avail
      * candidate a whole ring behind would be this position's own node:
      * when the dictionary is exactly the ring (a power of two), the farthest
      * distance is left out. */
-    if (cand == 0 || (int32_t)d <= 0 || d > e->dict_size || d > mask ||
-        d > hist || depth-- == 0) {
+    if (cand == 0 || d - 1u >= reach || depth-- == 0) {
       *ptr0 = 0;
       *ptr1 = 0;
       break;
