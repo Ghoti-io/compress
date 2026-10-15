@@ -124,7 +124,7 @@ The following are used only inside the library and are **not** part of the publi
 
 ### Method Layer
 
-Each compression method (deflate, deflate64, gzip, zlib, LZ4, LZW, RLE, zstd, brotli, lzma, lzma2, bzip2, xz, and the delta and bcj filters) implements the `gcomp_method_t` interface:
+Each compression method (deflate, deflate64, shrink, reduce, implode, gzip, zlib, LZ4, LZW, RLE, zstd, brotli, lzma, lzma2, bzip2, xz, and the delta and bcj filters) implements the `gcomp_method_t` interface:
 
 ```c
 struct gcomp_method_s {
@@ -522,6 +522,9 @@ compress/
 │   ├── xz.h                      # xz registration
 │   ├── deflate.h                 # Deflate-specific API
 │   ├── deflate64.h               # deflate64 registration
+│   ├── shrink.h                  # shrink registration
+│   ├── reduce.h                  # reduce registration
+│   ├── implode.h                 # implode registration
 │   ├── gzip.h                    # Gzip-specific API
 │   ├── lz4.h                     # LZ4-specific API
 │   ├── lzw.h                     # LZW-specific API
@@ -587,6 +590,12 @@ compress/
 │       │   ├── deflate64_encode.c    # Hash chains over 64 KiB, stored, fixed or dynamic blocks
 │       │   ├── deflate64_tables.c    # Length code 285, distance codes 30 and 31
 │       │   └── deflate64_register.c  # Vtable, schema, bound
+│       ├── shrink/
+│       │   └── shrink.c          # LZW with partial clearing: decoder, encoder, registration
+│       ├── reduce/
+│       │   └── reduce.c          # Follower sets and the marker byte
+│       ├── implode/
+│       │   └── implode.c         # Shannon-Fano trees over a sliding dictionary
 │       ├── xz/
 │       │   ├── xz_decode.c       # The container as a state machine; a chain per block
 │       │   ├── xz_encode.c       # Blocks, padding, checks, the index and footer

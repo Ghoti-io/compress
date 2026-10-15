@@ -22,6 +22,7 @@ libc.
 | --- | --- |
 | `"deflate"` | RFC 1951. |
 | `"deflate64"` | Deflate with a 64 KiB window, matches to 65538 bytes and distance codes 30 and 31: ZIP method 9 and a 7z coder, raw like `"deflate"`. |
+| `"shrink"`, `"reduce"`, `"implode"` | ZIP methods 1, 2 to 5 and 6, from PKWARE's APPNOTE: raw streams, with the sizes and flags a ZIP member records given as options. For reading old archives; write them only to test. |
 | `"zlib"` | RFC 1950. |
 | `"gzip"` | RFC 1952. |
 | `"lz4"` | `threads.count` encodes blocks in parallel. That output is byte-identical to the single-threaded stream. |

@@ -889,6 +889,9 @@ FUZZ_DEPFILES := $(patsubst fuzz/%.c,$(APP_DIR)/fuzz/%.d,$(FUZZ_SOURCES))
 .PHONY: fuzz-filters-roundtrip
 .PHONY: fuzz-xz-decoder fuzz-xz-encoder fuzz-xz-roundtrip
 .PHONY: fuzz-deflate64-decoder fuzz-deflate64-encoder fuzz-deflate64-roundtrip
+.PHONY: fuzz-shrink-decoder fuzz-shrink-encoder fuzz-shrink-roundtrip
+.PHONY: fuzz-implode-decoder fuzz-implode-encoder fuzz-implode-roundtrip
+.PHONY: fuzz-reduce-decoder fuzz-reduce-encoder fuzz-reduce-roundtrip
 .PHONY: fuzz-lzma2-decoder fuzz-lzma2-encoder fuzz-lzma2-roundtrip
 # Sanitizer commands
 .PHONY: test-asan test-asan-quiet test-ubsan sanitizer-help
@@ -1042,6 +1045,9 @@ fuzz-help: ## Show fuzzing help and instructions
 	@printf "    make fuzz-filters-roundtrip - Run the delta and bcj filter fuzzer\n"
 	@printf "    make fuzz-xz-decoder      - Run xz decoder fuzzer (also -encoder, -roundtrip)\n"
 	@printf "    make fuzz-deflate64-decoder - Run deflate64 decoder fuzzer (also -encoder, -roundtrip)\n"
+	@printf "    make fuzz-shrink-decoder - Run shrink decoder fuzzer (also -encoder, -roundtrip)\n"
+	@printf "    make fuzz-implode-decoder - Run implode decoder fuzzer (also -encoder, -roundtrip)\n"
+	@printf "    make fuzz-reduce-decoder - Run reduce decoder fuzzer (also -encoder, -roundtrip)\n"
 	@printf "\n"
 	@printf "Workflow:\n"
 	@printf "  1. make fuzz-corpus        # Generate seed inputs\n"
@@ -1670,6 +1676,141 @@ fuzz-deflate64-roundtrip: $(APP_DIR)/fuzz/fuzz_deflate64_roundtrip$(EXE_EXTENSIO
 		printf 'Hello' > fuzz/corpus/deflate64_roundtrip/hello.bin; \
 	fi
 	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/deflate64_roundtrip -o fuzz/findings/deflate64_roundtrip -- $(APP_DIR)/fuzz/fuzz_deflate64_roundtrip$(EXE_EXTENSION)
+
+fuzz-shrink-decoder: ## Run shrink decoder fuzzer (Ctrl+C to stop)
+fuzz-shrink-decoder: $(APP_DIR)/fuzz/fuzz_shrink_decoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running shrink Decoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/shrink_decoder
+	@if [ ! -d fuzz/corpus/shrink_decoder ] || [ -z "$$(ls -A fuzz/corpus/shrink_decoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/shrink_decoder; \
+		printf '\xfd7zSHRINK\x00' > fuzz/corpus/shrink_decoder/empty.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/shrink_decoder -o fuzz/findings/shrink_decoder -- $(APP_DIR)/fuzz/fuzz_shrink_decoder$(EXE_EXTENSION)
+
+fuzz-shrink-encoder: ## Run shrink encoder fuzzer (Ctrl+C to stop)
+fuzz-shrink-encoder: $(APP_DIR)/fuzz/fuzz_shrink_encoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running shrink Encoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/shrink_encoder
+	@if [ ! -d fuzz/corpus/shrink_encoder ] || [ -z "$$(ls -A fuzz/corpus/shrink_encoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/shrink_encoder; \
+		printf 'Hello' > fuzz/corpus/shrink_encoder/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/shrink_encoder -o fuzz/findings/shrink_encoder -- $(APP_DIR)/fuzz/fuzz_shrink_encoder$(EXE_EXTENSION)
+
+fuzz-shrink-roundtrip: ## Run shrink roundtrip fuzzer (Ctrl+C to stop)
+fuzz-shrink-roundtrip: $(APP_DIR)/fuzz/fuzz_shrink_roundtrip$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running shrink Roundtrip Fuzzer   ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/shrink_roundtrip
+	@if [ ! -d fuzz/corpus/shrink_roundtrip ] || [ -z "$$(ls -A fuzz/corpus/shrink_roundtrip 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/shrink_roundtrip; \
+		printf 'Hello' > fuzz/corpus/shrink_roundtrip/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/shrink_roundtrip -o fuzz/findings/shrink_roundtrip -- $(APP_DIR)/fuzz/fuzz_shrink_roundtrip$(EXE_EXTENSION)
+
+fuzz-implode-decoder: ## Run implode decoder fuzzer (Ctrl+C to stop)
+fuzz-implode-decoder: $(APP_DIR)/fuzz/fuzz_implode_decoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running implode Decoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/implode_decoder
+	@if [ ! -d fuzz/corpus/implode_decoder ] || [ -z "$$(ls -A fuzz/corpus/implode_decoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/implode_decoder; \
+		printf '\xfd7zIMPLODE\x00' > fuzz/corpus/implode_decoder/empty.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/implode_decoder -o fuzz/findings/implode_decoder -- $(APP_DIR)/fuzz/fuzz_implode_decoder$(EXE_EXTENSION)
+
+fuzz-implode-encoder: ## Run implode encoder fuzzer (Ctrl+C to stop)
+fuzz-implode-encoder: $(APP_DIR)/fuzz/fuzz_implode_encoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running implode Encoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/implode_encoder
+	@if [ ! -d fuzz/corpus/implode_encoder ] || [ -z "$$(ls -A fuzz/corpus/implode_encoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/implode_encoder; \
+		printf 'Hello' > fuzz/corpus/implode_encoder/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/implode_encoder -o fuzz/findings/implode_encoder -- $(APP_DIR)/fuzz/fuzz_implode_encoder$(EXE_EXTENSION)
+
+fuzz-implode-roundtrip: ## Run implode roundtrip fuzzer (Ctrl+C to stop)
+fuzz-implode-roundtrip: $(APP_DIR)/fuzz/fuzz_implode_roundtrip$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running implode Roundtrip Fuzzer   ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/implode_roundtrip
+	@if [ ! -d fuzz/corpus/implode_roundtrip ] || [ -z "$$(ls -A fuzz/corpus/implode_roundtrip 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/implode_roundtrip; \
+		printf 'Hello' > fuzz/corpus/implode_roundtrip/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/implode_roundtrip -o fuzz/findings/implode_roundtrip -- $(APP_DIR)/fuzz/fuzz_implode_roundtrip$(EXE_EXTENSION)
+
+fuzz-reduce-decoder: ## Run reduce decoder fuzzer (Ctrl+C to stop)
+fuzz-reduce-decoder: $(APP_DIR)/fuzz/fuzz_reduce_decoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running reduce Decoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/reduce_decoder
+	@if [ ! -d fuzz/corpus/reduce_decoder ] || [ -z "$$(ls -A fuzz/corpus/reduce_decoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/reduce_decoder; \
+		printf '\xfd7zREDUCE\x00' > fuzz/corpus/reduce_decoder/empty.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/reduce_decoder -o fuzz/findings/reduce_decoder -- $(APP_DIR)/fuzz/fuzz_reduce_decoder$(EXE_EXTENSION)
+
+fuzz-reduce-encoder: ## Run reduce encoder fuzzer (Ctrl+C to stop)
+fuzz-reduce-encoder: $(APP_DIR)/fuzz/fuzz_reduce_encoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running reduce Encoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/reduce_encoder
+	@if [ ! -d fuzz/corpus/reduce_encoder ] || [ -z "$$(ls -A fuzz/corpus/reduce_encoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/reduce_encoder; \
+		printf 'Hello' > fuzz/corpus/reduce_encoder/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/reduce_encoder -o fuzz/findings/reduce_encoder -- $(APP_DIR)/fuzz/fuzz_reduce_encoder$(EXE_EXTENSION)
+
+fuzz-reduce-roundtrip: ## Run reduce roundtrip fuzzer (Ctrl+C to stop)
+fuzz-reduce-roundtrip: $(APP_DIR)/fuzz/fuzz_reduce_roundtrip$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running reduce Roundtrip Fuzzer   ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/reduce_roundtrip
+	@if [ ! -d fuzz/corpus/reduce_roundtrip ] || [ -z "$$(ls -A fuzz/corpus/reduce_roundtrip 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/reduce_roundtrip; \
+		printf 'Hello' > fuzz/corpus/reduce_roundtrip/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/reduce_roundtrip -o fuzz/findings/reduce_roundtrip -- $(APP_DIR)/fuzz/fuzz_reduce_roundtrip$(EXE_EXTENSION)
 
 fuzz-filters-roundtrip: ## Run delta and bcj filter roundtrip fuzzer (Ctrl+C to stop)
 fuzz-filters-roundtrip: $(APP_DIR)/fuzz/fuzz_filters_roundtrip$(EXE_EXTENSION)

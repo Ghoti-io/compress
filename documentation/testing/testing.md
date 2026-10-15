@@ -373,6 +373,10 @@ tests/
 │   │   └── test_bzip2_encoder.cpp # Both decoders read it; blocks, runs, flush, bound
 │   ├── deflate64/                # deflate64 method tests
 │   │   └── test_deflate64.cpp    # Hand-built streams for the three changes, 7-Zip's stream, every level and buffering, malformed streams, limits
+│   ├── legacy_zip/               # real members of the old ZIP methods
+│   │   └── test_legacy_real_vectors.cpp # Fetched archives (tools/legacy_zip/fetch.sh, not committed): each member unpacks to the size and CRC-32 its own ZIP header records
+│   ├── shrink/, reduce/, implode/ # the old ZIP methods
+│   │   └── test_shrink.cpp, test_reduce.cpp, test_implode.cpp # Streams built by hand from the APPNOTE, round trips, malformed, limits
 │   ├── xz/                       # xz method tests
 │   │   └── test_xz.cpp           # Against liblzma both ways; blocks, filters, streams; refusals byte by byte
 │   ├── filters/                  # delta and bcj tests

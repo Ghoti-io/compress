@@ -601,6 +601,9 @@ int main(void) {
         {"bzip2", "bzip2_"},
         {"xz", "xz_"},
         {"deflate64", "deflate64_"},
+        {"shrink", "shrink_"},
+        {"implode", "implode_"},
+        {"reduce", "reduce_"},
     };
 
     gcomp_registry_t * registry = gcomp_registry_default();

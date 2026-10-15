@@ -1,0 +1,17 @@
+# The real ZIP members the old methods are tested on, from other projects'
+# test data, pinned to a commit each. One line, tab-separated:
+#   tag  bytes  sha256  licence  project  url
+# Not committed here: tools/legacy_zip/fetch.sh puts them in third_party/legacy_zip/.
+zip2-shrink	825	04d2b9534d3d0a07ae2fda191a464b32bae516a4b9471be29120755431faddf4	MIT	zip-rs/zip2	https://raw.githubusercontent.com/zip-rs/zip2/a5a1a669ee418c178d0788ca19a9db15597db1fb/tests/data/legacy/shrink.zip
+zip2-shrink-full-table	12153	cab8e3576040ea7bdb7bba5ff4771b8d7a929984ed00256c882dce44382aea39	MIT	zip-rs/zip2	https://raw.githubusercontent.com/zip-rs/zip2/a5a1a669ee418c178d0788ca19a9db15597db1fb/tests/data/legacy/shrink_full_table.zip
+zip2-implode	800	36ebf1dc4833767728e1cabb99aba83137931638a6b07754d437a3adefc7984a	MIT	zip-rs/zip2	https://raw.githubusercontent.com/zip-rs/zip2/a5a1a669ee418c178d0788ca19a9db15597db1fb/tests/data/legacy/implode.zip
+zip2-reduce	1058	bd76c104ed775b189a1ebf25f1f5d7f4a1cff42e01ef66d2af570ddba6f8d2f6	MIT	zip-rs/zip2	https://raw.githubusercontent.com/zip-rs/zip2/a5a1a669ee418c178d0788ca19a9db15597db1fb/tests/data/legacy/reduce.zip
+cc-shrunk	352	7403088a3219165f6de8d76abd2daf03bdcf72458dfa14713fc2b34d0293fb4e	Apache-2.0	apache/commons-compress	https://raw.githubusercontent.com/apache/commons-compress/16c030168ce3f10feb0e9c9762a4bc0474859f5d/src/test/resources/SHRUNK.ZIP
+cc-implode-4k-2trees	673	cde0fbf261fb6f18339b2159c530462bc91220d9b43cd090b303d5b663b3f0bb	Apache-2.0	apache/commons-compress	https://raw.githubusercontent.com/apache/commons-compress/16c030168ce3f10feb0e9c9762a4bc0474859f5d/src/test/resources/imploding-4Kdict-2trees.zip
+cc-implode-8k-3trees	4251	88d2bf6cf1e2f9604be7639ab67218e9a6ed946d0919b29cfff699c5bbc6c5fa	Apache-2.0	apache/commons-compress	https://raw.githubusercontent.com/apache/commons-compress/16c030168ce3f10feb0e9c9762a4bc0474859f5d/src/test/resources/imploding-8Kdict-3trees.zip
+sc-reduce1	67014	215bdc4295d2ed6968618171b3ed9d560a91aad5db1fc4a59067618f4599dd38	MIT	adamhathcock/sharpcompress	https://raw.githubusercontent.com/adamhathcock/sharpcompress/211ce28f406df84e726464d1b48b0f520fcf1bfe/tests/TestArchives/Archives/Zip.reduce1.zip
+sc-reduce2	66505	f56f236c07fe9d6916e0ece14dd4242b710f3d0f65902d5d7cf4fa651abe62ec	MIT	adamhathcock/sharpcompress	https://raw.githubusercontent.com/adamhathcock/sharpcompress/211ce28f406df84e726464d1b48b0f520fcf1bfe/tests/TestArchives/Archives/Zip.reduce2.zip
+sc-reduce3	66364	bd80e0966b2f3de534ccba1f24ad951ebff7d89940d3da0bec30cdf4a127d604	MIT	adamhathcock/sharpcompress	https://raw.githubusercontent.com/adamhathcock/sharpcompress/211ce28f406df84e726464d1b48b0f520fcf1bfe/tests/TestArchives/Archives/Zip.reduce3.zip
+sc-reduce4	66161	560d1243a560cd25134f724c73ce44eeba6b15b359601c286dded750993abd6b	MIT	adamhathcock/sharpcompress	https://raw.githubusercontent.com/adamhathcock/sharpcompress/211ce28f406df84e726464d1b48b0f520fcf1bfe/tests/TestArchives/Archives/Zip.reduce4.zip
+sc-shrink	71199	93e896b68b1ba06a266c956e58f614257f8aba4af85f52777cb1f54aee9abc59	MIT	adamhathcock/sharpcompress	https://raw.githubusercontent.com/adamhathcock/sharpcompress/211ce28f406df84e726464d1b48b0f520fcf1bfe/tests/TestArchives/Archives/Zip.shrink.zip
+sc-implode	63534	13b07e0a7dbfc7b4abe6758bbcfd10fe89985aeebd2bdc5e5f6a16cc8969c30f	MIT	adamhathcock/sharpcompress	https://raw.githubusercontent.com/adamhathcock/sharpcompress/211ce28f406df84e726464d1b48b0f520fcf1bfe/tests/TestArchives/Archives/Zip.implode.zip

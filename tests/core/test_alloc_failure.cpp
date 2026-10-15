@@ -51,6 +51,9 @@
 #include <ghoti.io/compress/zlib.h>
 #include <ghoti.io/compress/xz.h>
 #include <ghoti.io/compress/deflate64.h>
+#include <ghoti.io/compress/implode.h>
+#include <ghoti.io/compress/reduce.h>
+#include <ghoti.io/compress/shrink.h>
 #include <ghoti.io/compress/zstd.h>
 #include <gtest/gtest.h>
 
@@ -200,6 +203,15 @@ gcomp_status_t register_all(gcomp_registry_t * reg) {
     return s;
   }
   if ((s = gcomp_method_deflate64_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_shrink_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_implode_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_reduce_register(reg)) != GCOMP_OK) {
     return s;
   }
   if ((s = gcomp_method_bcj_register(reg)) != GCOMP_OK) {
@@ -924,6 +936,44 @@ void add_scenarios(std::vector<Scenario> & out) {
   out.push_back({"deflate64/empty", "deflate64", d64_level(6), empty,
       Mode::StreamingTiny, true});
 
+  // The three old ZIP methods: shrink has a table to clear, implode three trees
+  // to build and reduce its follower sets; implode and reduce are told how much
+  // data to expect, as their containers tell them.
+  out.push_back({"shrink/text", "shrink", [](gcomp_options_t *) {}, text,
+      Mode::StreamingTiny, true});
+  out.push_back({"shrink/random", "shrink", [](gcomp_options_t *) {}, rnd,
+      Mode::StreamingTiny, false});
+  out.push_back({"shrink/buffer", "shrink", [](gcomp_options_t *) {}, mixed,
+      Mode::Buffer, false});
+  out.push_back({"shrink/reset", "shrink", [](gcomp_options_t *) {}, text,
+      Mode::ResetReuse, false});
+  auto im_opts = [](size_t n, bool lit) {
+    return [=](gcomp_options_t * o) {
+      gcomp_options_set_bool(o, "implode.literal_tree", lit);
+      gcomp_options_set_uint64(o, "implode.uncompressed_size", n);
+    };
+  };
+  out.push_back({"implode/text", "implode", im_opts(text.size(), true), text,
+      Mode::StreamingTiny, true});
+  out.push_back({"implode/notree", "implode", im_opts(text.size(), false), text,
+      Mode::StreamingTiny, false});
+  out.push_back({"implode/random", "implode", im_opts(rnd.size(), true), rnd,
+      Mode::StreamingTiny, false});
+  out.push_back({"implode/reset", "implode", im_opts(text.size(), true), text,
+      Mode::ResetReuse, false});
+  auto rd_opts = [](size_t n, int factor) {
+    return [=](gcomp_options_t * o) {
+      gcomp_options_set_int64(o, "reduce.factor", factor);
+      gcomp_options_set_uint64(o, "reduce.uncompressed_size", n);
+    };
+  };
+  out.push_back({"reduce/text", "reduce", rd_opts(text.size(), 4), text,
+      Mode::StreamingTiny, true});
+  out.push_back({"reduce/random", "reduce", rd_opts(rnd.size(), 1), rnd,
+      Mode::StreamingTiny, false});
+  out.push_back({"reduce/reset", "reduce", rd_opts(text.size(), 2), text,
+      Mode::ResetReuse, false});
+
   // xz makes a chain of lzma2 and its filters, so it allocates through four
   // methods and the container's own index; a failure in any of them has to come
   // back as an error, whatever block it falls in.
@@ -1036,6 +1086,15 @@ TEST(AllocFailure, Xz) {
 }
 TEST(AllocFailure, Deflate64) {
   sweep_method("deflate64");
+}
+TEST(AllocFailure, Shrink) {
+  sweep_method("shrink");
+}
+TEST(AllocFailure, Implode) {
+  sweep_method("implode");
+}
+TEST(AllocFailure, Reduce) {
+  sweep_method("reduce");
 }
 TEST(AllocFailure, Delta) {
   sweep_method("delta");
