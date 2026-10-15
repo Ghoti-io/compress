@@ -50,6 +50,7 @@
 #include <ghoti.io/compress/stream.h>
 #include <ghoti.io/compress/xz.h>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <thread>
 #include <gtest/gtest.h>
@@ -1808,9 +1809,13 @@ TEST(XzThreads, TheLimitsGiveTheOrdinaryVerdictWithThreads) {
 struct ThreadTap {
   std::thread::id home = std::this_thread::get_id();
   std::atomic<size_t> foreign{0};
+  std::atomic<int> delay_ms{0}; /* each allocation on a worker waits this long */
   void note() {
     if (std::this_thread::get_id() != home) {
       foreign++;
+      if (delay_ms > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+      }
     }
   }
 };
@@ -1926,6 +1931,422 @@ TEST(XzCrc64, TheFoldingVersionIsTheTableVersion) {
         parts, buf.data() + off, std::min<size_t>(100, 4096 - off));
   }
   EXPECT_EQ(parts, whole);
+}
+
+
+/* ---- threads, in the streaming decoder ---------------------------------- */
+
+gcomp_options_t * Threaded(int threads,
+    std::initializer_list<std::pair<const char *, int64_t>> more = {}) {
+  gcomp_options_t * o = Opts({}, more);
+  EXPECT_EQ(gcomp_options_set_uint64(o, "threads.count", (uint64_t)threads),
+      GCOMP_OK);
+  return o;
+}
+
+TEST(XzStreamThreads, ReadsMultiBlockStreamsLikeOneThreadAtEveryCut) {
+  const Bytes data = mixed(420000);
+  Bytes streams[3];
+  streams[0] = lzmaref::xz_encode_blocks(data, 1, lzmaref::kCheckCrc64, 50000);
+  streams[1] = lzmaref::xz_encode_blocks(data, 0, lzmaref::kCheckSha256, 33333);
+  {
+    gcomp_options_t * e = Opts({{"xz.filters", "delta:2,x86"}, {"xz.check", "crc32"}},
+        {{"xz.preset", 1}, {"xz.block_size", 70000}});
+    streams[2] = encode(data, e).out;
+    gcomp_options_destroy(e);
+  }
+  for (const Bytes & z : streams) {
+    ASSERT_GE(blocks_of(z).size(), 3u);
+    for (int threads : {2, 4}) {
+      gcomp_options_t * o = Threaded(threads);
+      for (size_t ic : {size_t(1), size_t(777), size_t(65537), kAll}) {
+        for (size_t oc : {size_t(1), size_t(4096), size_t(1 << 16)}) {
+          if (ic == 1 && oc == 1) {
+            continue;
+          }
+          if (ic < 4000 && oc < 4096 && z.size() > 100000) {
+            continue;
+          }
+          const XzRun r = decode(z, o, ic, oc);
+          ASSERT_EQ(r.status, GCOMP_OK) << r.detail;
+          ASSERT_EQ(r.out, data)
+              << "threads " << threads << " in " << ic << " out " << oc;
+        }
+      }
+      gcomp_options_destroy(o);
+    }
+  }
+}
+
+TEST(XzStreamThreads, StreamsThatFollowEachOtherAndEmptyAndSingleBlockOnes) {
+  const Bytes a = words(150000, 3), b = noise(60000, 9);
+  Bytes sa = lzmaref::xz_encode_blocks(a, 1, lzmaref::kCheckCrc64, 40000);
+  Bytes sb = lzmaref::xz_encode_blocks(b, 1, lzmaref::kCheckCrc32, 25000);
+  const Bytes single = lzmaref::xz_encode(a, 1, lzmaref::kCheckCrc64);
+  Bytes empty = encode({}, nullptr).out;
+  Bytes joined = cat({sa, Bytes(8, 0), sb, empty, single});
+  Bytes want = cat({a, b, a});
+  gcomp_options_t * o = Threaded(4);
+  for (size_t ic : {size_t(500), kAll}) {
+    const XzRun r = decode(joined, o, ic, 3000);
+    ASSERT_EQ(r.status, GCOMP_OK) << r.detail;
+    EXPECT_EQ(r.out, want) << ic;
+  }
+  gcomp_options_destroy(o);
+}
+
+/// The serial decoder's verdict on @p z, and the threaded one's, through the
+/// streaming interface in the given pieces.
+void expect_same_stream_verdict(const Bytes & z, const std::string & what,
+    size_t ic = 5000, size_t oc = 3000) {
+  gcomp_options_t * s1 = Threaded(1);
+  gcomp_options_t * s4 = Threaded(4);
+  const XzRun a = decode(z, s1, ic, oc), b = decode(z, s4, ic, oc);
+  gcomp_options_destroy(s1);
+  gcomp_options_destroy(s4);
+  ASSERT_EQ(b.status, a.status) << what << " | serial: " << a.detail
+                                 << " | threaded: " << b.detail;
+  if (a.status == GCOMP_OK) {
+    ASSERT_EQ(b.out, a.out) << what;
+  }
+  else {
+    /* What the threaded decoder gives before the error is a prefix of what the
+     * serial one gave, never different bytes. */
+    ASSERT_LE(b.out.size(), a.out.size()) << what;
+    ASSERT_TRUE(std::equal(b.out.begin(), b.out.end(), a.out.begin())) << what;
+  }
+}
+
+TEST(XzStreamThreads, EveryByteChangedGivesTheVerdictOneThreadGives) {
+  Bytes original;
+  const Bytes z = rich_stream(original);
+  ASSERT_GE(blocks_of(z).size(), 3u);
+  for (size_t i = 0; i < z.size(); i++) {
+    for (uint8_t x : {uint8_t(0x01), uint8_t(0xFF)}) {
+      Bytes bad = z;
+      bad[i] ^= x;
+      expect_same_stream_verdict(bad, "byte " + std::to_string(i) + " ^ " +
+                                          std::to_string(x), 100, 50);
+    }
+  }
+  for (size_t cut = 0; cut < z.size(); cut += 5) {
+    expect_same_stream_verdict(Bytes(z.begin(), z.begin() + cut),
+        "cut at " + std::to_string(cut), 100, 50);
+  }
+}
+
+TEST(XzStreamThreads, ABadBlockAfterGoodOnesIsReportedAfterTheirOutput) {
+  const Bytes data = mixed(300000);
+  Bytes z = lzmaref::xz_encode_blocks(data, 1, lzmaref::kCheckCrc64, 40000);
+  const auto recs = blocks_of(z);
+  ASSERT_GE(recs.size(), 5u);
+  /* Damage the middle of the fourth block's data, and the header of the sixth:
+   * the fourth is the first to fail on one thread, and must be here. */
+  size_t at = 12;
+  for (size_t i = 0; i < 3; i++) {
+    at += ((recs[i].unpadded + 3) & ~3ull);
+  }
+  Bytes bad = z;
+  bad[at + 40] ^= 0x55;
+  size_t at6 = at + ((recs[3].unpadded + 3) & ~3ull) + ((recs[4].unpadded + 3) & ~3ull);
+  bad[at6 + 1] ^= 0x01;
+  expect_same_stream_verdict(bad, "fourth block data, sixth header", 4096, 4096);
+  gcomp_options_t * t = Threaded(4);
+  const XzRun r = decode(bad, t, 4096, 4096);
+  gcomp_options_destroy(t);
+  EXPECT_NE(r.status, GCOMP_OK);
+  EXPECT_GE(r.out.size(), 3u * 40000u) << "the blocks before the bad one are out";
+}
+
+TEST(XzStreamThreads, TheOutputLimitGivesTheSameStatusAndNoMoreBytes) {
+  const Bytes data = mixed(300000);
+  const Bytes z = lzmaref::xz_encode_blocks(data, 1, lzmaref::kCheckCrc64, 40000);
+  for (int64_t limit : {1000, 40000, 100000, 299999, 300000, 300001}) {
+    gcomp_options_t * s = Threaded(1, {{"limits.max_output_bytes", limit}});
+    gcomp_options_t * t = Threaded(4, {{"limits.max_output_bytes", limit}});
+    const XzRun a = decode(z, s, 4096, 4096), b = decode(z, t, 4096, 4096);
+    gcomp_options_destroy(s);
+    gcomp_options_destroy(t);
+    EXPECT_EQ(b.status, a.status) << limit;
+    EXPECT_EQ(b.out.size(), a.out.size()) << limit;
+    EXPECT_LE(b.out.size(), (size_t)limit) << limit;
+  }
+}
+
+TEST(XzStreamThreads, AMemoryLimitKeepsItInLine) {
+  const Bytes data = mixed(200000);
+  const Bytes z = lzmaref::xz_encode_blocks(data, 1, lzmaref::kCheckCrc64, 40000);
+  gcomp_options_t * t = Threaded(4, {{"limits.max_memory_bytes", 1 << 30}});
+  const XzRun r = decode(z, t, 4096, 4096);
+  gcomp_options_destroy(t);
+  ASSERT_EQ(r.status, GCOMP_OK) << r.detail;
+  EXPECT_EQ(r.out, data);
+}
+
+TEST(XzStreamThreads, WorkersRunAndResetAndDestroyWithBlocksOutAreClean) {
+  const Bytes data = mixed(400000);
+  const Bytes z = lzmaref::xz_encode_blocks(data, 1, lzmaref::kCheckCrc64, 30000);
+  {
+    TappedRegistry r;
+    gcomp_options_t * o = Threaded(4);
+    gcomp_decoder_t * dec = nullptr;
+    ASSERT_EQ(gcomp_decoder_create(r.reg, "xz", o, &dec), GCOMP_OK);
+    Bytes out, buf(1 << 16);
+    gcomp_buffer_t ib = {(void *)z.data(), z.size(), 0};
+    while (ib.used < ib.size) {
+      gcomp_buffer_t ob = {buf.data(), buf.size(), 0};
+      ASSERT_EQ(gcomp_decoder_update(dec, &ib, &ob), GCOMP_OK);
+      out.insert(out.end(), buf.begin(), buf.begin() + ob.used);
+    }
+    gcomp_status_t st;
+    do {
+      gcomp_buffer_t ob = {buf.data(), buf.size(), 0};
+      st = gcomp_decoder_finish(dec, &ob);
+      out.insert(out.end(), buf.begin(), buf.begin() + ob.used);
+    } while (st == GCOMP_ERR_LIMIT);
+    ASSERT_EQ(st, GCOMP_OK);
+    EXPECT_EQ(out, data);
+    EXPECT_GT(r.tap.foreign, 0u) << "no block was decoded on a worker";
+    /* Reset with blocks out, then a whole decode again. */
+    gcomp_buffer_t ib2 = {(void *)z.data(), z.size() / 2, 0};
+    gcomp_buffer_t ob2 = {buf.data(), 10, 0};
+    ASSERT_EQ(gcomp_decoder_reset(dec), GCOMP_OK);
+    ASSERT_EQ(gcomp_decoder_update(dec, &ib2, &ob2), GCOMP_OK);
+    ASSERT_EQ(gcomp_decoder_reset(dec), GCOMP_OK);
+    gcomp_buffer_t ib3 = {(void *)z.data(), z.size() / 3, 0};
+    gcomp_buffer_t ob3 = {buf.data(), 10, 0};
+    ASSERT_EQ(gcomp_decoder_update(dec, &ib3, &ob3), GCOMP_OK);
+    gcomp_decoder_destroy(dec); /* with work outstanding */
+    gcomp_options_destroy(o);
+  }
+}
+
+
+/// A decode through @p reg, with the stream cut into pieces of @p ic and output
+/// room of @p oc. The status is the first that is not OK, or finish's.
+XzRun decode_in(gcomp_registry_t * reg, const Bytes & z, gcomp_options_t * o,
+    size_t ic, size_t oc) {
+  XzRun r;
+  gcomp_decoder_t * dec = nullptr;
+  r.status = gcomp_decoder_create(reg, "xz", o, &dec);
+  if (r.status != GCOMP_OK) {
+    return r;
+  }
+  Bytes buf(oc);
+  size_t pos = 0;
+  while (pos < z.size() && r.status == GCOMP_OK) {
+    const size_t n = std::min(ic, z.size() - pos);
+    gcomp_buffer_t ib = {(void *)(z.data() + pos), n, 0};
+    size_t spins = 0;
+    while (ib.used < ib.size && r.status == GCOMP_OK) {
+      gcomp_buffer_t ob = {buf.data(), oc, 0};
+      const size_t before = ib.used;
+      r.status = gcomp_decoder_update(dec, &ib, &ob);
+      r.out.insert(r.out.end(), buf.begin(), buf.begin() + ob.used);
+      if (r.status == GCOMP_OK && ob.used == 0 && ib.used == before &&
+          ++spins > 4) {
+        r.status = GCOMP_ERR_INTERNAL;
+      }
+    }
+    pos += n;
+  }
+  for (size_t spins = 0; r.status == GCOMP_OK; spins++) {
+    gcomp_buffer_t ob = {buf.data(), oc, 0};
+    const gcomp_status_t s = gcomp_decoder_finish(dec, &ob);
+    r.out.insert(r.out.end(), buf.begin(), buf.begin() + ob.used);
+    if (s == GCOMP_OK) {
+      break;
+    }
+    if (s != GCOMP_ERR_LIMIT || spins > 1000000) {
+      r.status = s;
+    }
+  }
+  gcomp_decoder_destroy(dec);
+  return r;
+}
+
+/// Where each block of a single stream starts, and its padded length.
+std::vector<std::pair<size_t, size_t>> block_spans(const Bytes & z) {
+  std::vector<std::pair<size_t, size_t>> spans;
+  size_t at = 12;
+  for (const Rec & r : blocks_of(z)) {
+    const size_t len = (size_t)((r.unpadded + 3) & ~3ull);
+    spans.push_back({at, len});
+    at += len;
+  }
+  return spans;
+}
+
+TEST(XzStreamThreads, AnErrorBehindSlowBlocksWaitsForThemAndTruncationDeliversThem) {
+  const Bytes data = mixed(300000);
+  const Bytes z = lzmaref::xz_encode_blocks(data, 1, lzmaref::kCheckCrc64, 40000);
+  const auto spans = block_spans(z);
+  ASSERT_GE(spans.size(), 6u);
+  TappedRegistry r;
+  r.tap.delay_ms = 15;
+  gcomp_options_t * o = Threaded(4);
+
+  /* A bad header on the sixth block, found while the first five are still
+   * being decoded: all five are delivered first. */
+  Bytes bad = z;
+  bad[spans[5].first + 1] ^= 0x01;
+  XzRun a = decode_in(r.reg, bad, o, 4096, 4096);
+  EXPECT_EQ(a.status, GCOMP_ERR_CORRUPT);
+  EXPECT_EQ(a.out.size(), 5u * 40000u);
+
+  /* A stream cut just after the fourth block: the four are delivered. */
+  const size_t cut = spans[3].first + spans[3].second;
+  XzRun b = decode_in(r.reg, Bytes(z.begin(), z.begin() + cut), o, 4096, 4096);
+  EXPECT_EQ(b.status, GCOMP_ERR_CORRUPT);
+  EXPECT_EQ(b.out.size(), 4u * 40000u);
+  gcomp_options_destroy(o);
+}
+
+TEST(XzStreamThreads, ABlocksCheckArrivingLateIsStillWaitedFor) {
+  const Bytes data = mixed(120000);
+  const Bytes z = lzmaref::xz_encode_blocks(data, 1, lzmaref::kCheckSha256, 40000);
+  const auto spans = block_spans(z);
+  ASSERT_GE(spans.size(), 3u);
+  /* Everything of the first block up to two bytes into its check, a pause long
+   * enough for the worker to finish, and then the rest. */
+  const size_t part = spans[0].first + spans[0].second - 30;
+  gcomp_options_t * o = Threaded(4);
+  gcomp_decoder_t * dec = nullptr;
+  ASSERT_EQ(gcomp_decoder_create(gcomp_registry_default(), "xz", o, &dec),
+      GCOMP_OK);
+  Bytes out, buf(1 << 16);
+  auto feed = [&](size_t from, size_t to) {
+    gcomp_buffer_t ib = {(void *)(z.data() + from), to - from, 0};
+    while (ib.used < ib.size) {
+      gcomp_buffer_t ob = {buf.data(), buf.size(), 0};
+      ASSERT_EQ(gcomp_decoder_update(dec, &ib, &ob), GCOMP_OK);
+      out.insert(out.end(), buf.begin(), buf.begin() + ob.used);
+    }
+  };
+  feed(0, part);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  feed(part, part); /* a call with nothing new, after the worker is done */
+  feed(part, z.size());
+  gcomp_status_t st;
+  do {
+    gcomp_buffer_t ob = {buf.data(), buf.size(), 0};
+    st = gcomp_decoder_finish(dec, &ob);
+    out.insert(out.end(), buf.begin(), buf.begin() + ob.used);
+  } while (st == GCOMP_ERR_LIMIT);
+  EXPECT_EQ(st, GCOMP_OK);
+  EXPECT_EQ(out, data);
+  gcomp_decoder_destroy(dec);
+  gcomp_options_destroy(o);
+}
+
+TEST(XzStreamThreads, AnyControlByteOfALzma2ChunkGivesTheVerdictOneThreadGives) {
+  const Bytes data = mixed(90000);
+  gcomp_options_t * e = Opts({}, {{"xz.preset", 1}, {"xz.block_size", 30000}});
+  const Bytes z = encode(data, e).out;
+  gcomp_options_destroy(e);
+  const auto spans = block_spans(z);
+  ASSERT_GE(spans.size(), 3u);
+  const size_t hs = ((size_t)z[spans[1].first] + 1u) * 4u;
+  for (unsigned c = 0; c < 256; c++) {
+    Bytes bad = z;
+    bad[spans[1].first + hs] = (uint8_t)c; /* the block's first control byte */
+    expect_same_stream_verdict(bad, "control byte " + std::to_string(c), 4096, 4096);
+  }
+}
+
+TEST(XzStreamThreads, ChunksOfTwoMegabytesAreSized) {
+  /* Zeros make liblzma write LZMA2 chunks of the largest size, which needs
+   * the twenty-first bit of the size the chunk header spells. */
+  const Bytes data(5u << 20, 0);
+  Bytes z = lzmaref::xz_encode(data, 1, lzmaref::kCheckCrc64);
+  ASSERT_FALSE(z.empty());
+  z = cat({z, z});
+  gcomp_options_t * t = Threaded(4);
+  const XzRun r = decode(z, t, 1 << 16, 1 << 20);
+  gcomp_options_destroy(t);
+  ASSERT_EQ(r.status, GCOMP_OK) << r.detail;
+  EXPECT_EQ(r.out.size(), 2 * data.size());
+}
+
+/// @p z with the sizes its first block header declares moved by the given
+/// amounts, and the header's CRC made right again. Empty if the header has no
+/// sizes or a changed size would change the header's length.
+Bytes move_declared_sizes(const Bytes & z, int64_t comp_by, int64_t unc_by) {
+  Bytes out = z;
+  const size_t hs = ((size_t)z[12] + 1u) * 4u;
+  if (!(z[13] & 0x40) || !(z[13] & 0x80)) {
+    return {};
+  }
+  size_t p = 14;
+  uint64_t comp = 0, unc = 0;
+  const size_t comp_at = p;
+  if (!vli(z, p, comp)) {
+    return {};
+  }
+  const size_t unc_at = p;
+  if (!vli(z, p, unc)) {
+    return {};
+  }
+  const size_t comp_len = unc_at - comp_at, unc_len = p - unc_at;
+  uint8_t tmp[16];
+  const uint64_t nc = comp + (uint64_t)comp_by, nu = unc + (uint64_t)unc_by;
+  if (xz_vli_put(tmp, nc) != comp_len) {
+    return {};
+  }
+  std::memcpy(out.data() + comp_at, tmp, comp_len);
+  if (xz_vli_put(tmp, nu) != unc_len) {
+    return {};
+  }
+  std::memcpy(out.data() + unc_at, tmp, unc_len);
+  const uint32_t crc = xz_crc32(out.data() + 12, hs - 4);
+  for (int i = 0; i < 4; i++) {
+    out[12 + hs - 4 + i] = (uint8_t)(crc >> (8 * i));
+  }
+  return out;
+}
+
+TEST(XzStreamThreads, DeclaredBlockSizesAreHeldToAsOneThreadHoldsThem) {
+  const Bytes data = mixed(80000);
+  const Bytes z = lzmaref::xz_encode(data, 1, lzmaref::kCheckCrc64);
+  ASSERT_FALSE(move_declared_sizes(z, 0, 0).empty())
+      << "liblzma's buffer encoder was expected to write both sizes";
+  expect_same_stream_verdict(move_declared_sizes(z, 0, 0), "unchanged");
+  for (int64_t d : {-1, 1, -7, 7}) {
+    for (int which = 0; which < 2; which++) {
+      const Bytes bad = move_declared_sizes(z, which == 0 ? d : 0, which == 1 ? d : 0);
+      if (bad.empty()) {
+        continue;
+      }
+      gcomp_options_t * s1 = Threaded(1);
+      const XzRun serial = decode(bad, s1, 4096, 4096);
+      gcomp_options_destroy(s1);
+      EXPECT_NE(serial.status, GCOMP_OK) << "a wrong size must be refused";
+      expect_same_stream_verdict(bad, "size " + std::to_string(which) + " by " +
+                                          std::to_string(d));
+    }
+  }
+}
+
+TEST(XzStreamThreads, AnExpansionRatioLimitGivesTheOrdinaryVerdictAndMemoryLimitsKeepItInLine) {
+  const Bytes data(3u << 20, 0);
+  gcomp_options_t * e = Opts({}, {{"xz.preset", 1}, {"xz.block_size", 1 << 20}});
+  const Bytes z = encode(data, e).out;
+  gcomp_options_destroy(e);
+  for (int64_t ratio : {2, 50, 100000}) {
+    gcomp_options_t * s = Threaded(1, {{"limits.max_expansion_ratio", ratio}});
+    gcomp_options_t * t = Threaded(4, {{"limits.max_expansion_ratio", ratio}});
+    const XzRun a = decode(z, s, 4096, 1 << 16), b = decode(z, t, 4096, 1 << 16);
+    gcomp_options_destroy(s);
+    gcomp_options_destroy(t);
+    EXPECT_EQ(b.status, a.status) << ratio;
+  }
+  /* With a memory limit set, nothing is decoded on a worker. */
+  TappedRegistry r;
+  gcomp_options_t * m = Threaded(4, {{"limits.max_memory_bytes", 1 << 30}});
+  const XzRun c = decode_in(r.reg, z, m, 4096, 1 << 16);
+  gcomp_options_destroy(m);
+  EXPECT_EQ(c.status, GCOMP_OK);
+  EXPECT_EQ(r.tap.foreign, 0u);
 }
 
 } // namespace
