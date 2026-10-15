@@ -61,6 +61,7 @@ void xz_chain_clear(xz_chain_t * c) {
   c->count = 0;
   c->fin = 0;
   c->fin_started = 0;
+  c->fl = 0;
   c->status = GCOMP_OK;
   c->detail[0] = '\0';
 }
@@ -273,6 +274,68 @@ gcomp_status_t xz_chain_finish(xz_chain_t * c, gcomp_buffer_t * output) {
   }
 }
 
+gcomp_status_t xz_chain_flush(
+    xz_chain_t * c, gcomp_buffer_t * output, gcomp_flush_t mode) {
+  gcomp_status_t s = ensure_buffers(c);
+  if (s != GCOMP_OK) {
+    return s;
+  }
+  for (;;) {
+    unsigned i;
+    int last;
+    if (c->status != GCOMP_OK) {
+      return c->status;
+    }
+    (void)pump(c, NULL, output);
+    if (c->status != GCOMP_OK) {
+      return c->status;
+    }
+    if (c->fl == c->count) {
+      c->fl = 0;
+      return GCOMP_OK;
+    }
+    i = c->fl;
+    last = i + 1 == c->count;
+    if (i > 0 && c->st[i - 1].pos != c->st[i - 1].len) {
+      /* What the stage before made has not all gone in, and the pump has just
+       * shown that it cannot: the output is full. */
+      return GCOMP_ERR_LIMIT;
+    }
+    {
+      gcomp_buffer_t dst;
+      if (last) {
+        dst = *output;
+      }
+      else {
+        dst = room_after(&c->st[i]);
+      }
+      s = gcomp_encoder_flush(c->st[i].enc, &dst, mode);
+      if (last) {
+        output->used = dst.used;
+      }
+      else {
+        c->st[i].len += dst.used;
+      }
+      if (s == GCOMP_OK) {
+        c->fl++;
+        continue;
+      }
+      if (s != GCOMP_ERR_LIMIT) {
+        remember(c, i, s);
+        return c->status;
+      }
+      if (last) {
+        return GCOMP_ERR_LIMIT;
+      }
+      /* The buffer after this stage is full: let the next ones take from it,
+       * and if they cannot, it is the output that is full. */
+      if (dst.used == 0 && pump(c, NULL, output) == 0) {
+        return GCOMP_ERR_LIMIT;
+      }
+    }
+  }
+}
+
 gcomp_status_t xz_chain_reset(xz_chain_t * c) {
   unsigned i;
   for (i = 0; i < c->count; i++) {
@@ -285,6 +348,7 @@ gcomp_status_t xz_chain_reset(xz_chain_t * c) {
   }
   c->fin = 0;
   c->fin_started = 0;
+  c->fl = 0;
   c->status = GCOMP_OK;
   c->detail[0] = '\0';
   return GCOMP_OK;

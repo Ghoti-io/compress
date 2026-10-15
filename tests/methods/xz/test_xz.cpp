@@ -568,7 +568,7 @@ TEST(Xz, TheStreamDoesNotDependOnHowTheBytesArrive) {
   gcomp_options_destroy(o);
 }
 
-TEST(Xz, AFlushEndsTheBlockAndWhatFollowsIsAnotherOne) {
+TEST(Xz, AFullFlushEndsTheBlockAndWhatFollowsIsAnotherOne) {
   gcomp_registry_t * reg = gcomp_registry_default();
   const Bytes a = words(40000, 4), b = noise(20000, 6);
   gcomp_options_t * o = Opts({}, {{"xz.preset", 1}});
@@ -588,7 +588,7 @@ TEST(Xz, AFlushEndsTheBlockAndWhatFollowsIsAnotherOne) {
   size_t before_flush = z.size();
   do {
     gcomp_buffer_t ob = {buf.data(), 1000, 0};
-    s = gcomp_encoder_flush(enc, &ob, GCOMP_FLUSH_SYNC);
+    s = gcomp_encoder_flush(enc, &ob, GCOMP_FLUSH_FULL);
     z.insert(z.end(), buf.begin(), buf.begin() + ob.used);
   } while (s == GCOMP_ERR_LIMIT);
   ASSERT_EQ(s, GCOMP_OK);
@@ -1500,7 +1500,8 @@ TEST(Xz, DetectAndPeekRecogniseTheHeader) {
 /* ---- threads ------------------------------------------------------------ */
 
 /// Encode with a flush after @p flush_at bytes of input, in the given pieces.
-Bytes encode_flushed(gcomp_options_t * o, const Bytes & data, size_t flush_at) {
+Bytes encode_flushed(gcomp_options_t * o, const Bytes & data, size_t flush_at,
+    gcomp_flush_t mode = GCOMP_FLUSH_FULL) {
   gcomp_registry_t * reg = gcomp_registry_default();
   gcomp_encoder_t * enc = nullptr;
   EXPECT_EQ(gcomp_encoder_create(reg, "xz", o, &enc), GCOMP_OK);
@@ -1518,7 +1519,7 @@ Bytes encode_flushed(gcomp_options_t * o, const Bytes & data, size_t flush_at) {
     do {
       gcomp_buffer_t ob = {buf.data(), 700, 0};
       s = fin ? gcomp_encoder_finish(enc, &ob)
-              : gcomp_encoder_flush(enc, &ob, GCOMP_FLUSH_SYNC);
+              : gcomp_encoder_flush(enc, &ob, mode);
       z.insert(z.end(), buf.begin(), buf.begin() + ob.used);
     } while (s == GCOMP_ERR_LIMIT);
     EXPECT_EQ(s, GCOMP_OK);
@@ -1585,7 +1586,7 @@ TEST(XzThreads, WithoutABlockSizeThreadsAreNotUsedAndNothingChanges) {
   EXPECT_EQ(blocks_of(y.out).size(), 1u);
 }
 
-TEST(XzThreads, AFlushIsTheSameAsWithoutThreads) {
+TEST(XzThreads, AFullFlushIsTheSameAsWithoutThreads) {
   const Bytes data = mixed(250000);
   for (size_t at : {size_t(0), size_t(1), size_t(30000), size_t(60000),
            size_t(61000), size_t(250000)}) {
@@ -2347,6 +2348,150 @@ TEST(XzStreamThreads, AnExpansionRatioLimitGivesTheOrdinaryVerdictAndMemoryLimit
   gcomp_options_destroy(m);
   EXPECT_EQ(c.status, GCOMP_OK);
   EXPECT_EQ(r.tap.foreign, 0u);
+}
+
+
+/* ---- sync flush --------------------------------------------------------- */
+
+/// What liblzma's streaming decoder makes of @p prefix, a stream that is not
+/// finished: everything it can, which is what a reader on the other end of a
+/// pipe would have.
+Bytes liblzma_partial(const Bytes & prefix, size_t cap) {
+  lzmaref::Stream s;
+  std::memset(&s, 0, sizeof(s));
+  Bytes out(cap + 1);
+  if (lzmaref::lib().stream_decoder(&s, UINT64_MAX, 0) != 0) {
+    return {};
+  }
+  s.next_in = prefix.data();
+  s.avail_in = prefix.size();
+  s.next_out = out.data();
+  s.avail_out = out.size();
+  lzmaref::lib().code(&s, 0 /* LZMA_RUN */);
+  out.resize(out.size() - s.avail_out);
+  lzmaref::lib().end(&s);
+  return out;
+}
+
+/// One flush in the given mode with @p oc bytes of room at a time; the bytes it
+/// wrote are appended to @p z.
+void flush_with(gcomp_encoder_t * enc, gcomp_flush_t mode, size_t oc, Bytes & z) {
+  Bytes buf(oc);
+  gcomp_status_t s;
+  size_t spins = 0;
+  do {
+    gcomp_buffer_t ob = {buf.data(), oc, 0};
+    s = gcomp_encoder_flush(enc, &ob, mode);
+    z.insert(z.end(), buf.begin(), buf.begin() + ob.used);
+    ASSERT_LT(++spins, 10000000u);
+  } while (s == GCOMP_ERR_LIMIT);
+  ASSERT_EQ(s, GCOMP_OK);
+}
+
+void feed_bytes(gcomp_encoder_t * enc, const uint8_t * d, size_t n, size_t oc,
+    Bytes & z) {
+  Bytes buf(oc);
+  gcomp_buffer_t ib = {(void *)d, n, 0};
+  while (ib.used < ib.size) {
+    gcomp_buffer_t ob = {buf.data(), oc, 0};
+    ASSERT_EQ(gcomp_encoder_update(enc, &ib, &ob), GCOMP_OK);
+    z.insert(z.end(), buf.begin(), buf.begin() + ob.used);
+  }
+}
+
+void finish_bytes(gcomp_encoder_t * enc, size_t oc, Bytes & z) {
+  Bytes buf(oc);
+  gcomp_status_t s;
+  do {
+    gcomp_buffer_t ob = {buf.data(), oc, 0};
+    s = gcomp_encoder_finish(enc, &ob);
+    z.insert(z.end(), buf.begin(), buf.begin() + ob.used);
+  } while (s == GCOMP_ERR_LIMIT);
+  ASSERT_EQ(s, GCOMP_OK);
+}
+
+TEST(XzSyncFlush, EverythingGivenIsOutAndTheBlockGoesOn) {
+  const Bytes a = words(50000, 4), b = mixed(40000), c = words(30000, 8);
+  struct Config {
+    const char * filters;
+    size_t blocks_after_two_flushes; /* a converter cannot flush: it ends the block */
+  };
+  const Config configs[] = {{"", 1}, {"delta:4", 1}, {"x86", 3}};
+  for (const Config & cfg : configs) {
+    for (size_t oc : {size_t(1), size_t(7), size_t(4096)}) {
+      gcomp_options_t * o = Opts({{"xz.filters", cfg.filters}, {"xz.check", "sha256"}},
+          {{"xz.preset", 1}});
+      gcomp_encoder_t * enc = nullptr;
+      ASSERT_EQ(gcomp_encoder_create(gcomp_registry_default(), "xz", o, &enc),
+          GCOMP_OK);
+      Bytes z;
+      feed_bytes(enc, a.data(), a.size(), 4096, z);
+      flush_with(enc, GCOMP_FLUSH_SYNC, oc, z);
+      /* What has been written so far, fed to a reader that has nothing else,
+       * gives back everything that was put in. */
+      Bytes got = liblzma_partial(z, a.size() + 16);
+      ASSERT_EQ(got, a) << cfg.filters << " oc " << oc << ": liblzma";
+      {
+        const XzRun mine = run_xz(false, nullptr, z, kAll, 1 << 16);
+        ASSERT_EQ(mine.out, a) << cfg.filters << " oc " << oc << ": ours";
+      }
+      /* Nothing new: a flush is allowed and changes nothing that matters. */
+      flush_with(enc, GCOMP_FLUSH_SYNC, oc, z);
+      feed_bytes(enc, b.data(), b.size(), 4096, z);
+      flush_with(enc, GCOMP_FLUSH_SYNC, oc, z);
+      Bytes ab = a;
+      ab.insert(ab.end(), b.begin(), b.end());
+      ASSERT_EQ(liblzma_partial(z, ab.size() + 16), ab) << cfg.filters;
+      feed_bytes(enc, c.data(), c.size(), 4096, z);
+      finish_bytes(enc, oc, z);
+      gcomp_encoder_destroy(enc);
+      gcomp_options_destroy(o);
+      Bytes all = ab;
+      all.insert(all.end(), c.begin(), c.end());
+      lzmaref::XzResult r = lzmaref::xz_decode(z, all.size() + 16);
+      ASSERT_EQ(r.ret, 1) << cfg.filters;
+      ASSERT_EQ(r.out, all) << cfg.filters;
+      EXPECT_EQ(blocks_of(z).size(), cfg.blocks_after_two_flushes)
+          << cfg.filters << " oc " << oc;
+    }
+  }
+}
+
+TEST(XzSyncFlush, KeepsTheDictionaryWhichAFullFlushForgets) {
+  /* The same text twice, a flush between: with a sync flush the second copy is
+   * a match, with a full flush it is not. */
+  const Bytes text = words(60000, 11);
+  auto size_with = [&](gcomp_flush_t mode) {
+    gcomp_options_t * o = Opts({}, {{"xz.preset", 6}});
+    gcomp_encoder_t * enc = nullptr;
+    EXPECT_EQ(gcomp_encoder_create(gcomp_registry_default(), "xz", o, &enc),
+        GCOMP_OK);
+    Bytes z;
+    feed_bytes(enc, text.data(), text.size(), 1 << 16, z);
+    flush_with(enc, mode, 1 << 16, z);
+    feed_bytes(enc, text.data(), text.size(), 1 << 16, z);
+    finish_bytes(enc, 1 << 16, z);
+    gcomp_encoder_destroy(enc);
+    gcomp_options_destroy(o);
+    lzmaref::XzResult r = lzmaref::xz_decode(z, 2 * text.size() + 16);
+    EXPECT_EQ(r.ret, 1);
+    EXPECT_EQ(r.out.size(), 2 * text.size());
+    return z.size();
+  };
+  const size_t sync = size_with(GCOMP_FLUSH_SYNC), full = size_with(GCOMP_FLUSH_FULL);
+  EXPECT_LT(sync * 3 / 2, full) << "sync " << sync << " full " << full;
+}
+
+TEST(XzSyncFlush, WithThreadsItEndsTheBlockAndStillDecodes) {
+  const Bytes a = mixed(90000);
+  gcomp_options_t * t = Opts({}, {{"xz.preset", 1}, {"xz.block_size", 40000},
+                                     {"threads.count", 4}});
+  const Bytes z = encode_flushed(t, a, 25000, GCOMP_FLUSH_SYNC);
+  gcomp_options_destroy(t);
+  lzmaref::XzResult r = lzmaref::xz_decode(z, a.size() + 16);
+  ASSERT_EQ(r.ret, 1);
+  EXPECT_EQ(r.out, a);
+  EXPECT_GE(blocks_of(z).size(), 3u) << "the flush ends a block under threads";
 }
 
 } // namespace

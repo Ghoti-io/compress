@@ -70,6 +70,7 @@ typedef struct xz_chain_s {
   unsigned count;
   unsigned fin; /* the first stage not yet finished */
   int fin_started; /* finish() has been called on stage `fin` */
+  unsigned fl; /* the stage a flush has got to */
   gcomp_status_t status; /* the first failure, kept */
   char detail[256];
   xz_chain_stage_t st[XZ_CHAIN_STAGES_MAX];
@@ -99,6 +100,20 @@ gcomp_status_t xz_chain_reset(xz_chain_t * c);
  */
 gcomp_status_t xz_chain_update(
     xz_chain_t * c, gcomp_buffer_t * input, gcomp_buffer_t * output);
+
+/**
+ * @brief Flush every stage in turn, so that everything given so far is out in
+ *        @p output, and leave the chain open for more.
+ *
+ * Only an encoder chain whose stages can flush may be asked: LZMA2 and delta
+ * can, a branch converter cannot (it holds back bytes that may start a
+ * branch). The caller knows which it has.
+ *
+ * @return ::GCOMP_OK when all is out; ::GCOMP_ERR_LIMIT when @p output is full
+ *         and more is to come, call again; or an error.
+ */
+gcomp_status_t xz_chain_flush(
+    xz_chain_t * c, gcomp_buffer_t * output, gcomp_flush_t mode);
 
 /**
  * @brief Finish every stage in turn and drain it into @p output.

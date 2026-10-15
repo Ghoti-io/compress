@@ -78,6 +78,7 @@ typedef struct {
 
   xz_chain_t chain;
   int chain_built;
+  int flushable; /* every filter in front of LZMA2 can flush: only delta can */
   uint8_t hdr[XZ_BLOCK_HEADER_MAX];
   size_t hdr_size;
 
@@ -334,6 +335,15 @@ static gcomp_status_t encoder_init(gcomp_registry_t * registry,
   s = build_chain(e, encoder);
   if (s != GCOMP_OK) {
     return s;
+  }
+  e->flushable = 1;
+  {
+    unsigned fi;
+    for (fi = 0; fi < e->nfilters; fi++) {
+      if (e->filters[fi].id != XZ_FILTER_DELTA) {
+        e->flushable = 0;
+      }
+    }
   }
   s = par_init(e, options, threads);
   if (s != GCOMP_OK) {
@@ -1022,13 +1032,20 @@ gcomp_status_t xz_encoder_finish(
   }
 }
 
-/* Any flush ends the block that is open: a block is the unit a reader can
- * decode on its own, and the filters in front of LZMA2 may hold bytes back
- * that a sync flush could not give up. What follows starts a new block. */
+/* A sync flush makes everything given so far available at the output and
+ * keeps the block open: the dictionary and the filters' state go on, so what
+ * follows still matches what came before (LZMA2 chunks end where the flush
+ * is, and a reader can decode as far as that). A branch converter cannot be
+ * flushed, since it holds back bytes that may start a branch, so with one in
+ * front of LZMA2 a sync flush ends the block instead. A full flush always
+ * does: it means forgetting everything before this point, and a block is the
+ * unit that does. With threads the blocks are coded whole by workers, so
+ * there a sync flush ends the block as well, which is why the bytes differ
+ * from one thread's for a stream that is flushed. What follows a closed block
+ * starts a new one. */
 gcomp_status_t xz_encoder_flush(
     gcomp_encoder_t * encoder, gcomp_buffer_t * output, gcomp_flush_t mode) {
   xz_enc_t * e = encoder->method_state;
-  (void)mode;
   if (!e) {
     return GCOMP_ERR_INVALID_ARG;
   }
@@ -1046,6 +1063,19 @@ gcomp_status_t xz_encoder_flush(
       return GCOMP_ERR_LIMIT;
     }
     if (!e->block_open) {
+      return GCOMP_OK;
+    }
+    if (mode == GCOMP_FLUSH_SYNC && e->flushable) {
+      const size_t before = output->used;
+      s = xz_chain_flush(&e->chain, output, mode);
+      e->block_out += output->used - before;
+      if (s == GCOMP_ERR_LIMIT) {
+        return s;
+      }
+      if (s != GCOMP_OK) {
+        return gcomp_encoder_set_error(encoder, s, "xz: %s",
+            e->chain.detail[0] ? e->chain.detail : "the filter chain failed");
+      }
       return GCOMP_OK;
     }
     e->closing = 1;
