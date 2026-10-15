@@ -1460,15 +1460,15 @@ typedef struct preset_s {
  * expects; the search effort is this encoder's own. The optimal parser costs
  * several times the lazy one however shallow its search, so the presets from 4
  * trade by narrowing the search: 3 is the lazy parser, and 4 to 6 the optimal
- * one at nice 16, 32 and 64. Measured on 12 MB of headers and of executables,
+ * one at nice 24, 32 and 64. Measured on 12 MB of headers and of executables,
  * each of 3 to 6 lands within a few percent of xz's size for the same preset
  * in about its time. */
 static const preset_t g_presets[10] = {
     {1u << 18, 32, 4, 0},
     {1u << 20, 32, 8, 0},
     {1u << 21, 48, 16, 0},
-    {1u << 22, 32, 48, 0},
-    {1u << 22, 16, 8, 1},
+    {1u << 22, 48, 64, 0},
+    {1u << 22, 24, 8, 1},
     {1u << 23, 32, 20, 1},
     {1u << 23, 64, 40, 1},
     {1u << 24, 128, 80, 1},
