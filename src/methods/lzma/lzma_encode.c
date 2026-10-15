@@ -865,6 +865,16 @@ typedef struct enc_opt_s {
   uint8_t rep;
   uint8_t state;
   uint32_t reps[4];
+  /* A node reached by a repeat of the last distance may carry the symbols
+   * before it: pre 1 is a literal, pre 2 is the symbol described by k1, len1,
+   * dist1 and rep1, then a literal. Only a path as a whole is cheaper, so only
+   * as a whole can it be kept: the node ahead of the literal has a cheaper way
+   * in that does not leave the repeat's distance in the right place. */
+  uint8_t pre;
+  uint8_t k1;
+  uint8_t rep1;
+  uint16_t len1;
+  uint32_t dist1;
 } enc_opt_t;
 
 /* Offer a way to reach node `to` from node `from`; keep it if it is cheaper. */
@@ -885,6 +895,7 @@ static inline void opt_try(lzma_enc_t * e, uint32_t to, uint32_t price,
   }
   o->price = price;
   o->prev = from;
+  o->pre = 0;
   o->kind = (uint8_t)kind;
   o->len = (uint16_t)len;
   o->dist = dist;
@@ -916,6 +927,90 @@ static inline void opt_relax(lzma_enc_t * e, uint32_t to, uint32_t price,
     uint32_t from, enc_kind_t kind, unsigned len, uint32_t dist, unsigned rep) {
   opt_grow(e, to);
   opt_try(e, to, price, from, kind, len, dist, rep);
+}
+
+/* Offer a path into node `to` that ends in a repeat of the last distance and
+ * has, before it, a literal (pre 1) or a symbol and a literal (pre 2). */
+static inline void opt_try_pre(lzma_enc_t * e, uint32_t to, uint32_t price,
+    uint32_t from, unsigned len, unsigned pre, enc_kind_t k1, unsigned len1,
+    uint32_t dist1, unsigned rep1) {
+  enc_opt_t * o = &e->opt[to];
+  const enc_opt_t * f = &e->opt[from];
+  unsigned st = f->state;
+  if (price >= o->price) {
+    return;
+  }
+  o->price = price;
+  o->prev = from;
+  o->pre = (uint8_t)pre;
+  o->kind = ES_REP;
+  o->len = (uint16_t)len;
+  o->dist = 0;
+  o->rep = 0;
+  o->k1 = (uint8_t)k1;
+  o->len1 = (uint16_t)len1;
+  o->dist1 = dist1;
+  o->rep1 = (uint8_t)rep1;
+  memcpy(o->reps, f->reps, sizeof(o->reps));
+  if (pre == 2) {
+    if (k1 == ES_MATCH) {
+      st = lzma_state_match(st);
+      o->reps[0] = dist1;
+      o->reps[1] = f->reps[0];
+      o->reps[2] = f->reps[1];
+      o->reps[3] = f->reps[2];
+    }
+    else {
+      unsigned r;
+      st = lzma_state_rep(st);
+      o->reps[0] = f->reps[rep1];
+      for (r = rep1; r > 0; r--) {
+        o->reps[r] = f->reps[r - 1];
+      }
+    }
+  }
+  o->state = (uint8_t)lzma_state_rep(lzma_state_literal(st));
+}
+
+/* The repeats that can follow a literal at idx + at, when `price` is the cost
+ * of reaching idx + at and `st` the state there, `rep0` the distance a repeat
+ * would use: relax every length of one, reached through pre (and k1..rep1 for
+ * pre 2) from node `from`. `at` is where the literal is. */
+static void opt_lit_rep(lzma_enc_t * e, size_t idx, size_t position,
+    uint32_t from, unsigned at, uint32_t price, unsigned st, uint32_t rep0,
+    size_t end, unsigned pre, enc_kind_t k1, unsigned len1, uint32_t dist1,
+    unsigned rep1) {
+  const size_t pos_mask = ((size_t)1 << e->pb) - 1u;
+  size_t j = idx + at;
+  size_t d = (size_t)rep0 + 1u;
+  unsigned lim, l2, st2, ps, ps2, len;
+  uint32_t sel;
+  const uint16_t * lp;
+  if (j + 3u > end || d > j + 1u - e->hist_start) {
+    return;
+  }
+  if (e->win[j + 1u] != e->win[j + 1u - d]) {
+    return;
+  }
+  lim = end - j - 1u > e->nice_len ? e->nice_len : (unsigned)(end - j - 1u);
+  l2 = match_len(e->win + j + 1u, e->win + j + 1u - d, lim);
+  if (l2 < 2) {
+    return;
+  }
+  ps = (unsigned)(position + at) & (unsigned)pos_mask;
+  ps2 = (unsigned)(position + at + 1u) & (unsigned)pos_mask;
+  st2 = lzma_state_literal(st);
+  sel = price + price0(e, e->probs.is_match[st][ps]) +
+      literal_price(e, j, position + at, st, rep0) +
+      price1(e, e->probs.is_match[st2][ps2]) + price1(e, e->probs.is_rep[st2]) +
+      price0(e, e->probs.is_rep_g0[st2]) +
+      price1(e, e->probs.is_rep0_long[st2][ps2]);
+  lp = len_prices(e, 1, ps2);
+  opt_grow(e, (uint32_t)(from + at + 1u + l2));
+  for (len = 2; len <= l2; len++) {
+    opt_try_pre(e, (uint32_t)(from + at + 1u + len), sel + lp[len - LZMA_MATCH_MIN],
+        from, len, pre, k1, len1, dist1, rep1);
+  }
 }
 
 /* One step of the binary-tree match finder (the LZMA SDK's BT4): enter idx as
@@ -1168,6 +1263,12 @@ static void parse_optimal(lzma_enc_t * e, size_t end) {
             literal_price(e, idx, position, state, n->reps[0]),
         cur, ES_LIT, 1, 0, 0);
 
+    /* A literal, then a repeat of this node's last distance. */
+    if (avail >= 3) {
+      opt_lit_rep(e, idx, position, cur, 0, base, state, n->reps[0], end, 1,
+          ES_LIT, 0, 0, 0);
+    }
+
     /* The one-byte repeat of the last distance. */
     if (hist > n->reps[0] && e->win[idx] == e->win[idx - (size_t)n->reps[0] - 1u]) {
       opt_relax(e, cur + 1u,
@@ -1198,6 +1299,9 @@ static void parse_optimal(lzma_enc_t * e, size_t end) {
           opt_try(e, cur + len, sel + lp[len - LZMA_MATCH_MIN], cur, ES_REP, len,
               0, r);
         }
+        opt_lit_rep(e, idx, position, cur, rep_len[r],
+            sel + lp[rep_len[r] - LZMA_MATCH_MIN], lzma_state_rep(state),
+            n->reps[r], end, 2, ES_REP, rep_len[r], 0, r);
       }
     }
 
@@ -1220,6 +1324,11 @@ static void parse_optimal(lzma_enc_t * e, size_t end) {
           }
         }
         prev_len = pairs[k].len;
+        opt_lit_rep(e, idx, position, cur, pairs[k].len,
+            p_nomatch + dist_price_of(e, pairs[k].dist, lzma_dist_state(pairs[k].len)) +
+                lp[pairs[k].len - LZMA_MATCH_MIN],
+            lzma_state_match(state), pairs[k].dist, end, 2, ES_MATCH,
+            pairs[k].len, pairs[k].dist, 0);
       }
     }
 
@@ -1237,6 +1346,20 @@ static void parse_optimal(lzma_enc_t * e, size_t end) {
     size_t last;
     while (b != 0) {
       queue_sym(e, &opt[b]);
+      if (opt[b].pre != 0) {
+        enc_sym_t * ls = &e->queue[e->queue_len++];
+        ls->kind = ES_LIT;
+        ls->len = 1;
+        ls->dist = 0;
+        ls->rep = 0;
+        if (opt[b].pre == 2) {
+          enc_sym_t * s1 = &e->queue[e->queue_len++];
+          s1->kind = (enc_kind_t)opt[b].k1;
+          s1->len = opt[b].len1;
+          s1->dist = opt[b].dist1;
+          s1->rep = opt[b].rep1;
+        }
+      }
       b = opt[b].prev;
     }
     first = 0;
@@ -1436,9 +1559,9 @@ gcomp_status_t lzma_encoder_init(gcomp_registry_t * registry,
   }
   if (e->optimal) {
     e->opt = gcomp_malloc(
-        alloc, (ENC_OPT_MAX + LZMA_MATCH_MAX + 2u) * sizeof(*e->opt));
+        alloc, (ENC_OPT_MAX + 2u * LZMA_MATCH_MAX + 4u) * sizeof(*e->opt));
     e->queue = gcomp_malloc(
-        alloc, (ENC_OPT_MAX + LZMA_MATCH_MAX + 2u) * sizeof(*e->queue));
+        alloc, (ENC_OPT_MAX + 2u * LZMA_MATCH_MAX + 4u) * sizeof(*e->queue));
     price_init(e);
   }
   if (!e->win || !e->head || !e->head3 || !e->head2 || !e->prev || !e->lit ||

@@ -17,6 +17,7 @@
 #include "lzma_oracle.h"
 #include "test_helpers.h"
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <ghoti.io/compress/compress.h>
 #include <ghoti.io/compress/errors.h>
@@ -902,6 +903,40 @@ TEST_F(LzmaEncoderTest, TheRatioStaysNearLiblzmaAtEveryPreset) {
     EXPECT_LE((double)z.size(), k.ceiling * (double)ref.size())
         << k.name << " preset " << k.preset << ": " << z.size() << " against "
         << ref.size();
+  }
+}
+
+/**
+ * Machine code is where the parser's choice of repeat matters most: records
+ * and instruction sequences that repeat at a few distances, with a changed
+ * byte between. A literal followed by a repeat of the last distance, or a
+ * match, a literal and a repeat, is one path the parser must price whole; a
+ * parser that does not finds the cheaper way into the node ahead of the
+ * literal and loses the distance, and was about one percent behind liblzma on
+ * executables where this one is level with it. The input is the first MiB of
+ * this test's own executable, which is code on every platform that has /proc.
+ */
+TEST_F(LzmaEncoderTest, MachineCodeIsAsSmallAsLiblzmasAtTheDefaultPreset) {
+  FILE * f = fopen("/proc/self/exe", "rb");
+  if (!f) {
+    GTEST_SKIP() << "no /proc/self/exe on this platform, so there is no machine "
+                    "code to hand; the ratio on code is not checked here";
+  }
+  Bytes data(1u << 20);
+  size_t got = fread(data.data(), 1, data.size(), f);
+  fclose(f);
+  ASSERT_EQ(got, data.size()) << "the test executable is smaller than 1 MiB";
+  for (int preset : {4, 6}) {
+    gcomp_options_t * o = Opts("lzma", {{"preset", preset}});
+    Bytes z;
+    ASSERT_EQ(Encode("lzma", data, z, data.size(), 1 << 16, o), GCOMP_OK);
+    gcomp_options_destroy(o);
+    Bytes ref = lzmaref::alone_encode(data, lzmaref::options(preset));
+    ASSERT_FALSE(ref.empty());
+    /* Measured 1.001 at preset 4 and 0.999 at 6, against 1.011 and 1.009
+     * without the combined paths. */
+    EXPECT_LE((double)z.size(), 1.004 * (double)ref.size())
+        << "preset " << preset << ": " << z.size() << " against " << ref.size();
   }
 }
 
