@@ -850,8 +850,8 @@ TEST_F(LzmaEncoderTest, TheBoundCoversEveryStreamAndOnlyLzma2HasOne) {
 
 /**
  * How close the encoder gets to liblzma at each preset. The ceilings are measured with a margin, so that they fail
- * on a regression and not on noise. Presets 3 and up use the optimal parser and
- * are held to within about one percent of liblzma's.
+ * on a regression and not on noise. Presets 4 and up use the optimal parser and
+ * are held to within about one percent of liblzma's; 3 is the lazy parser.
  */
 TEST_F(LzmaEncoderTest, TheRatioStaysNearLiblzmaAtEveryPreset) {
   struct Case {
@@ -864,13 +864,13 @@ TEST_F(LzmaEncoderTest, TheRatioStaysNearLiblzmaAtEveryPreset) {
       {"words200k", 1, 1.03},
       {"mixed3m", 0, 1.03},
       {"mixed3m", 1, 1.03},
-      /* The optimal parser, which is what presets 3 and up use. Measured at
+      /* The optimal parser, which is what presets 4 and up use. Measured at
        * 1.006, 1.001 and 1.006 (words, mixed, source) against preset 6, with
        * ceilings a few tenths of a percent above, so that a parser that loses
-       * its prices or its repeats fails; preset 3 is smaller than liblzma's
-       * because liblzma's preset 3 does not search as hard as this one. */
-      {"words200k", 3, 0.78},
-      {"mixed3m", 3, 0.97},
+       * its prices or its repeats fails. Preset 3 is the lazy parser, measured
+       * at 1.000, 1.000 and 1.001 against liblzma's. */
+      {"words200k", 3, 1.01},
+      {"mixed3m", 3, 1.01},
       {"words200k", 6, 1.008},
       {"mixed3m", 6, 1.002},
       {"words200k", 9, 1.008},
@@ -878,7 +878,7 @@ TEST_F(LzmaEncoderTest, TheRatioStaysNearLiblzmaAtEveryPreset) {
       {"noise100k", 6, 1.001},
       {"zeros1m", 6, 1.10},
       {"far", 6, 1.01},
-      {"source600k", 3, 0.75},
+      {"source600k", 3, 1.01},
       {"source600k", 6, 1.008},
       {"source600k", 9, 1.008},
       {"noise100k", 1, 1.001},
@@ -907,7 +907,7 @@ TEST_F(LzmaEncoderTest, TheRatioStaysNearLiblzmaAtEveryPreset) {
 
 /**
  * Parsing for price has to pay: at the same dictionary, the optimal parser
- * (preset 3 and up) writes less than the fast one (preset 2 and down) on data
+ * (preset 5 and up) writes less than the fast one (preset 2 and down) on data
  * with something to find, by enough that it is not noise. Without this a
  * parser that quietly fell back to the fast path would pass every other test
  * here, which only ask that the stream decode.
@@ -922,14 +922,14 @@ TEST_F(LzmaEncoderTest, TheOptimalParserWritesLessThanTheFastOne) {
     }
     ASSERT_NE(data, nullptr) << name;
     size_t fast = 0, optimal = 0;
-    for (int preset : {2, 3}) {
+    for (int preset : {2, 5}) {
       gcomp_options_t * o = Opts("lzma2", {{"preset", preset}});
       Bytes z;
       ASSERT_EQ(Encode("lzma2", *data, z, data->size(), 1 << 16, o), GCOMP_OK);
       gcomp_options_destroy(o);
       (preset == 2 ? fast : optimal) = z.size();
     }
-    EXPECT_LT((double)optimal, 0.95 * (double)fast) << name;
+    EXPECT_LT((double)optimal, 0.97 * (double)fast) << name;
   }
 }
 

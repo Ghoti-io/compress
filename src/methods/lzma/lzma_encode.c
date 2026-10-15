@@ -787,8 +787,8 @@ static inline uint32_t dist_price_of(const lzma_enc_t * e, uint32_t dist, unsign
 
 /* The price of a length for one of the two length coders at one position
  * state, from a table filled the first time it is asked for. */
-static inline uint32_t len_price_of(
-    lzma_enc_t * e, int rep, unsigned pos_state, unsigned len) {
+static inline const uint16_t * len_prices(
+    lzma_enc_t * e, int rep, unsigned pos_state) {
   uint16_t * tab = e->len_price[rep][pos_state];
   if (!e->len_valid[rep][pos_state]) {
     const lzma_len_probs_t * l = rep ? &e->probs.rep_len : &e->probs.len;
@@ -811,7 +811,12 @@ static inline uint32_t len_price_of(
     }
     e->len_valid[rep][pos_state] = 1;
   }
-  return tab[len - LZMA_MATCH_MIN];
+  return tab;
+}
+
+static inline uint32_t len_price_of(
+    lzma_enc_t * e, int rep, unsigned pos_state, unsigned len) {
+  return len_prices(e, rep, pos_state)[len - LZMA_MATCH_MIN];
 }
 
 /* What a literal costs in the context it would be coded in. */
@@ -863,13 +868,17 @@ typedef struct enc_opt_s {
 } enc_opt_t;
 
 /* Offer a way to reach node `to` from node `from`; keep it if it is cheaper. */
-static inline void opt_relax(lzma_enc_t * e, uint32_t to, uint32_t price,
-    uint32_t from, enc_kind_t kind, unsigned len, uint32_t dist, unsigned rep) {
-  enc_opt_t * o;
-  const enc_opt_t * f = &e->opt[from];
+static inline void opt_grow(lzma_enc_t * e, uint32_t to) {
   while (e->opt_len < to) {
     e->opt[++e->opt_len].price = ENC_OPT_INF;
   }
+}
+
+/* opt_relax for a node opt_grow has already reached. */
+static inline void opt_try(lzma_enc_t * e, uint32_t to, uint32_t price,
+    uint32_t from, enc_kind_t kind, unsigned len, uint32_t dist, unsigned rep) {
+  enc_opt_t * o;
+  const enc_opt_t * f = &e->opt[from];
   o = &e->opt[to];
   if (price >= o->price) {
     return;
@@ -901,6 +910,12 @@ static inline void opt_relax(lzma_enc_t * e, uint32_t to, uint32_t price,
     }
     o->reps[0] = f->reps[rep];
   }
+}
+
+static inline void opt_relax(lzma_enc_t * e, uint32_t to, uint32_t price,
+    uint32_t from, enc_kind_t kind, unsigned len, uint32_t dist, unsigned rep) {
+  opt_grow(e, to);
+  opt_try(e, to, price, from, kind, len, dist, rep);
 }
 
 /* One step of the binary-tree match finder (the LZMA SDK's BT4): enter idx as
@@ -1154,23 +1169,36 @@ static void parse_optimal(lzma_enc_t * e, size_t end) {
                        : price1(e, e->probs.is_rep_g0[state]) +
                   price1(e, e->probs.is_rep_g1[state]) +
                   price_bit(e, e->probs.is_rep_g2[state], r - 2u));
-      for (len = 2; len <= rep_len[r]; len++) {
-        opt_relax(e, cur + len, sel + len_price_of(e, 1, pos_state, len), cur,
-            ES_REP, len, 0, r);
+      {
+        const uint16_t * lp = len_prices(e, 1, pos_state);
+        opt_grow(e, cur + rep_len[r]);
+        for (len = 2; len <= rep_len[r]; len++) {
+          opt_try(e, cur + len, sel + lp[len - LZMA_MATCH_MIN], cur, ES_REP, len,
+              0, r);
+        }
       }
     }
 
     /* Matches, each length at the nearest distance that reaches it. */
     prev_len = 1;
-    for (k = 0; k < np; k++) {
-      unsigned len;
-      for (len = prev_len + 1u; len <= pairs[k].len; len++) {
-        opt_relax(e, cur + len,
-            p_nomatch + len_price_of(e, 0, pos_state, len) +
-                dist_price_of(e, pairs[k].dist, lzma_dist_state(len)),
-            cur, ES_MATCH, len, pairs[k].dist, 0);
+    if (np > 0) {
+      const uint16_t * lp = len_prices(e, 0, pos_state);
+      opt_grow(e, cur + pairs[np - 1].len);
+      for (k = 0; k < np; k++) {
+        unsigned len = prev_len + 1u;
+        /* The distance's price depends on the length only up to four, so it
+         * is found once per length state, not once per length. */
+        while (len <= pairs[k].len) {
+          unsigned ds = lzma_dist_state(len);
+          unsigned upto = ds < LZMA_DIST_STATES - 1u ? len : pairs[k].len;
+          uint32_t dbase = p_nomatch + dist_price_of(e, pairs[k].dist, ds);
+          for (; len <= upto; len++) {
+            opt_try(e, cur + len, dbase + lp[len - LZMA_MATCH_MIN], cur, ES_MATCH,
+                len, pairs[k].dist, 0);
+          }
+        }
+        prev_len = pairs[k].len;
       }
-      prev_len = pairs[k].len;
     }
 
     cur++;
@@ -1248,22 +1276,28 @@ static void lzma_encoder_destroy_state(lzma_enc_t * e);
 typedef struct preset_s {
   uint32_t dict;
   unsigned nice;
-  unsigned depth;
+  unsigned depth; /* hash-chain candidates tried (or tree nodes, if optimal) */
+  int optimal;
 } preset_t;
 
 /* The dictionaries are xz's, which is what a container advertising a preset
- * expects; the search effort is this encoder's own. */
+ * expects; the search effort is this encoder's own. The optimal parser costs
+ * several times the lazy one however shallow its search, so the presets from 4
+ * trade by narrowing the search: 3 is the lazy parser, and 4 to 6 the optimal
+ * one at nice 16, 32 and 64. Measured on 12 MB of headers and of executables,
+ * each of 3 to 6 lands within a few percent of xz's size for the same preset
+ * in about its time. */
 static const preset_t g_presets[10] = {
-    {1u << 18, 32, 4},
-    {1u << 20, 32, 8},
-    {1u << 21, 48, 16},
-    {1u << 22, 64, 24},
-    {1u << 22, 64, 32},
-    {1u << 23, 64, 48},
-    {1u << 23, 96, 64},
-    {1u << 24, 128, 96},
-    {1u << 25, 192, 128},
-    {1u << 26, 273, 192},
+    {1u << 18, 32, 4, 0},
+    {1u << 20, 32, 8, 0},
+    {1u << 21, 48, 16, 0},
+    {1u << 22, 32, 48, 0},
+    {1u << 22, 16, 8, 1},
+    {1u << 23, 32, 20, 1},
+    {1u << 23, 64, 40, 1},
+    {1u << 24, 128, 80, 1},
+    {1u << 25, 192, 112, 1},
+    {1u << 26, 273, 152, 1},
 };
 
 static void enc_model_reset(lzma_enc_t * e) {
@@ -1352,8 +1386,8 @@ gcomp_status_t lzma_encoder_init(gcomp_registry_t * registry,
   e->dict_size = dict != 0 ? (uint32_t)dict : g_presets[preset].dict;
   e->nice_len = g_presets[preset].nice;
   e->depth = g_presets[preset].depth;
-  e->optimal = preset >= 3;
-  e->bt_depth = 16u + e->nice_len / 2u;
+  e->optimal = g_presets[preset].optimal;
+  e->bt_depth = e->depth;
   e->known_size = size;
   e->lit_count = lzma_lit_count(e->lc, e->lp);
   e->head_bits = ceil_log2_u32(e->dict_size);

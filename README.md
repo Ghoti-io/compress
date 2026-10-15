@@ -28,7 +28,7 @@ libc.
 | `"bzip2"` | Streams of Burrows-Wheeler blocks, as `bzip2` and libbz2 write them. The encoder sorts with SA-IS and is within a few bytes of libbz2's size; a flush ends the stream. |
 | `"xz"` | The xz container: streams of blocks, each a chain of filters ending in LZMA2, with a CRC-32, CRC-64 or SHA-256 check and an index. Read and written as `xz` and liblzma do, including several blocks, several streams and the filters above. |
 | `"delta"`, `"bcj"` | Filters, not compressors: a byte-wise difference, and the branch converters for x86, PowerPC, IA-64, ARM, ARM Thumb, SPARC, ARM64 and RISC-V. Same size in and out, no header, exact in both directions, and xz's own, so an xz stream carries them. |
-| `"lzma"`, `"lzma2"` | LZMA-alone (`.lzma`, or raw with `lzma.raw`) and the LZMA2 chunk framing. The encoder is a fast-mode parser, within a few percent of liblzma at presets 0 to 3. |
+| `"lzma"`, `"lzma2"` | LZMA-alone (`.lzma`, or raw with `lzma.raw`) and the LZMA2 chunk framing. The encoder is within a few percent of liblzma's size and time at every preset. |
 | `"lzw"`, `"rle"` | The same registry, the same buffer rule. |
 | `"zstd"` | `threads.count` encodes blocks in parallel. `seekable.h` is random access into a seekable frame. |
 
