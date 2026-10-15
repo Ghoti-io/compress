@@ -1,0 +1,17 @@
+# The pinned build image with the pinned references added, so one container
+# run can build the tests and run the ones that call zstd and pyzstd, instead
+# of failing them or skipping them with GCOMP_SKIP_ORACLE_TESTS=1.
+#
+# Nothing here is a second pin. The compiler is ghoti-build:gcc16 as it is, and
+# the references are the bytes of the ones in the oracle image
+# (../refs), copied across rather than installed again, so a version
+# the oracle image pins is the version in here by construction. Both images are
+# Debian 13.7 with Python 3.13.5, and the build image already carries liblz4,
+# libxxhash and libbrotli, which is everything the zstd CLI and pyzstd link.
+#
+#   podman build -t ghoti-build:gcc16-refs tools/oracle/containers/build-with-refs
+FROM localhost/ghoti-build:gcc16
+COPY --from=localhost/ghoti-compress-oracle-refs:deb13-4 /usr/bin/zstd /usr/bin/zstd
+COPY --from=localhost/ghoti-compress-oracle-refs:deb13-4 /usr/local/lib/python3.13/dist-packages/ /usr/local/lib/python3.13/dist-packages/
+RUN ln -s zstd /usr/bin/unzstd && ln -s zstd /usr/bin/zstdcat \
+ && zstd --version && python3 -c "import pyzstd, backports.zstd; print(pyzstd.__version__)"
