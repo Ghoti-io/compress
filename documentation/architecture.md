@@ -124,7 +124,7 @@ The following are used only inside the library and are **not** part of the publi
 
 ### Method Layer
 
-Each compression method (deflate, gzip, zlib, LZ4, LZW, RLE, zstd, brotli, lzma, lzma2, bzip2, xz, and the delta and bcj filters) implements the `gcomp_method_t` interface:
+Each compression method (deflate, deflate64, gzip, zlib, LZ4, LZW, RLE, zstd, brotli, lzma, lzma2, bzip2, xz, and the delta and bcj filters) implements the `gcomp_method_t` interface:
 
 ```c
 struct gcomp_method_s {
@@ -521,6 +521,7 @@ compress/
 │   ├── filter.h                  # delta and bcj registration
 │   ├── xz.h                      # xz registration
 │   ├── deflate.h                 # Deflate-specific API
+│   ├── deflate64.h               # deflate64 registration
 │   ├── gzip.h                    # Gzip-specific API
 │   ├── lz4.h                     # LZ4-specific API
 │   ├── lzw.h                     # LZW-specific API
@@ -581,6 +582,11 @@ compress/
 │       │   ├── bzip2_bwt.c       # SA-IS suffix sort of the block written twice
 │       │   ├── bzip2_crc.c       # The MSB-first CRC-32 table
 │       │   └── bzip2_register.c  # Vtable and registration
+│       ├── deflate64/
+│       │   ├── deflate64_decode.c    # A resumable decoder for deflate's blocks with the 64 KiB changes
+│       │   ├── deflate64_encode.c    # Hash chains over 64 KiB, stored, fixed or dynamic blocks
+│       │   ├── deflate64_tables.c    # Length code 285, distance codes 30 and 31
+│       │   └── deflate64_register.c  # Vtable, schema, bound
 │       ├── xz/
 │       │   ├── xz_decode.c       # The container as a state machine; a chain per block
 │       │   ├── xz_encode.c       # Blocks, padding, checks, the index and footer

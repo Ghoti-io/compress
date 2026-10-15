@@ -50,6 +50,7 @@
 #include <ghoti.io/compress/stream.h>
 #include <ghoti.io/compress/zlib.h>
 #include <ghoti.io/compress/xz.h>
+#include <ghoti.io/compress/deflate64.h>
 #include <ghoti.io/compress/zstd.h>
 #include <gtest/gtest.h>
 
@@ -196,6 +197,9 @@ gcomp_status_t register_all(gcomp_registry_t * reg) {
     return s;
   }
   if ((s = gcomp_method_xz_register(reg)) != GCOMP_OK) {
+    return s;
+  }
+  if ((s = gcomp_method_deflate64_register(reg)) != GCOMP_OK) {
     return s;
   }
   if ((s = gcomp_method_bcj_register(reg)) != GCOMP_OK) {
@@ -898,6 +902,28 @@ void add_scenarios(std::vector<Scenario> & out) {
   out.push_back({"bzip2/empty", "bzip2", bz_level(1), empty,
       Mode::StreamingTiny, true});
 
+  // deflate64 holds a window, the match finder's tables and the staging for a
+  // block; a failure in any of them has to come back as an error.
+  auto d64_level = [](int64_t level) {
+    return [=](gcomp_options_t * o) {
+      gcomp_options_set_int64(o, "deflate64.level", level);
+    };
+  };
+  out.push_back({"deflate64/text", "deflate64", d64_level(6), text,
+      Mode::StreamingTiny, true});
+  out.push_back({"deflate64/random", "deflate64", d64_level(6), rnd,
+      Mode::StreamingTiny, false});
+  out.push_back({"deflate64/stored", "deflate64", d64_level(0), text,
+      Mode::StreamingTiny, false});
+  out.push_back({"deflate64/flush", "deflate64", d64_level(4), text,
+      Mode::StreamingFlush, true});
+  out.push_back({"deflate64/buffer", "deflate64", d64_level(9), mixed,
+      Mode::Buffer, false});
+  out.push_back({"deflate64/reset", "deflate64", d64_level(1), text,
+      Mode::ResetReuse, false});
+  out.push_back({"deflate64/empty", "deflate64", d64_level(6), empty,
+      Mode::StreamingTiny, true});
+
   // xz makes a chain of lzma2 and its filters, so it allocates through four
   // methods and the container's own index; a failure in any of them has to come
   // back as an error, whatever block it falls in.
@@ -1007,6 +1033,9 @@ TEST(AllocFailure, Bzip2) {
 }
 TEST(AllocFailure, Xz) {
   sweep_method("xz");
+}
+TEST(AllocFailure, Deflate64) {
+  sweep_method("deflate64");
 }
 TEST(AllocFailure, Delta) {
   sweep_method("delta");

@@ -888,6 +888,7 @@ FUZZ_DEPFILES := $(patsubst fuzz/%.c,$(APP_DIR)/fuzz/%.d,$(FUZZ_SOURCES))
 .PHONY: fuzz-bzip2-decoder fuzz-bzip2-encoder fuzz-bzip2-roundtrip
 .PHONY: fuzz-filters-roundtrip
 .PHONY: fuzz-xz-decoder fuzz-xz-encoder fuzz-xz-roundtrip
+.PHONY: fuzz-deflate64-decoder fuzz-deflate64-encoder fuzz-deflate64-roundtrip
 .PHONY: fuzz-lzma2-decoder fuzz-lzma2-encoder fuzz-lzma2-roundtrip
 # Sanitizer commands
 .PHONY: test-asan test-asan-quiet test-ubsan sanitizer-help
@@ -1040,6 +1041,7 @@ fuzz-help: ## Show fuzzing help and instructions
 	@printf "    make fuzz-bzip2-decoder   - Run bzip2 decoder fuzzer (also -encoder, -roundtrip)\n"
 	@printf "    make fuzz-filters-roundtrip - Run the delta and bcj filter fuzzer\n"
 	@printf "    make fuzz-xz-decoder      - Run xz decoder fuzzer (also -encoder, -roundtrip)\n"
+	@printf "    make fuzz-deflate64-decoder - Run deflate64 decoder fuzzer (also -encoder, -roundtrip)\n"
 	@printf "\n"
 	@printf "Workflow:\n"
 	@printf "  1. make fuzz-corpus        # Generate seed inputs\n"
@@ -1623,6 +1625,51 @@ fuzz-xz-roundtrip: $(APP_DIR)/fuzz/fuzz_xz_roundtrip$(EXE_EXTENSION)
 		printf 'Hello' > fuzz/corpus/xz_roundtrip/hello.bin; \
 	fi
 	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/xz_roundtrip -o fuzz/findings/xz_roundtrip -- $(APP_DIR)/fuzz/fuzz_xz_roundtrip$(EXE_EXTENSION)
+
+fuzz-deflate64-decoder: ## Run deflate64 decoder fuzzer (Ctrl+C to stop)
+fuzz-deflate64-decoder: $(APP_DIR)/fuzz/fuzz_deflate64_decoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running deflate64 Decoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/deflate64_decoder
+	@if [ ! -d fuzz/corpus/deflate64_decoder ] || [ -z "$$(ls -A fuzz/corpus/deflate64_decoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/deflate64_decoder; \
+		printf '\xfd7zDEFLATE64\x00' > fuzz/corpus/deflate64_decoder/empty.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/deflate64_decoder -o fuzz/findings/deflate64_decoder -- $(APP_DIR)/fuzz/fuzz_deflate64_decoder$(EXE_EXTENSION)
+
+fuzz-deflate64-encoder: ## Run deflate64 encoder fuzzer (Ctrl+C to stop)
+fuzz-deflate64-encoder: $(APP_DIR)/fuzz/fuzz_deflate64_encoder$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running deflate64 Encoder Fuzzer     ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/deflate64_encoder
+	@if [ ! -d fuzz/corpus/deflate64_encoder ] || [ -z "$$(ls -A fuzz/corpus/deflate64_encoder 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/deflate64_encoder; \
+		printf 'Hello' > fuzz/corpus/deflate64_encoder/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/deflate64_encoder -o fuzz/findings/deflate64_encoder -- $(APP_DIR)/fuzz/fuzz_deflate64_encoder$(EXE_EXTENSION)
+
+fuzz-deflate64-roundtrip: ## Run deflate64 roundtrip fuzzer (Ctrl+C to stop)
+fuzz-deflate64-roundtrip: $(APP_DIR)/fuzz/fuzz_deflate64_roundtrip$(EXE_EXTENSION)
+	@printf "\033[0;32m\n"
+	@printf "#########################################\n"
+	@printf "### Running deflate64 Roundtrip Fuzzer   ###\n"
+	@printf "#########################################\n"
+	@printf "\033[0m\n"
+	@mkdir -p fuzz/findings/deflate64_roundtrip
+	@if [ ! -d fuzz/corpus/deflate64_roundtrip ] || [ -z "$$(ls -A fuzz/corpus/deflate64_roundtrip 2>/dev/null)" ]; then \
+		printf "\033[0;33mWarning: No seed corpus found. Creating minimal seed...\033[0m\n"; \
+		mkdir -p fuzz/corpus/deflate64_roundtrip; \
+		printf 'Hello' > fuzz/corpus/deflate64_roundtrip/hello.bin; \
+	fi
+	$(AFL_RUN_ENV) afl-fuzz -m $(AFL_MEM_LIMIT) $(AFL_TIME_FLAG) -i fuzz/corpus/deflate64_roundtrip -o fuzz/findings/deflate64_roundtrip -- $(APP_DIR)/fuzz/fuzz_deflate64_roundtrip$(EXE_EXTENSION)
 
 fuzz-filters-roundtrip: ## Run delta and bcj filter roundtrip fuzzer (Ctrl+C to stop)
 fuzz-filters-roundtrip: $(APP_DIR)/fuzz/fuzz_filters_roundtrip$(EXE_EXTENSION)
