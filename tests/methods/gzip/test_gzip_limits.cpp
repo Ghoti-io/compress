@@ -345,9 +345,14 @@ TEST_F(GzipLimitsTest, AHeaderFieldLongerThanTheInternalBufferIsRead) {
   };
 
   for (const auto & f : fields) {
-    std::vector<uint8_t> member = {0x1f, 0x8b, 0x08, f.flag, 0x00, 0x00, 0x00,
+    // Sized once, then filled: GCC 16 under TSan takes a fill appended to the
+    // ten-byte initializer list (insert or resize) for an overrun of it, and
+    // -Werror=array-bounds then stops test-tsan building at all.
+    static const uint8_t header[10] = {0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x03};
-    member.insert(member.end(), f.length, (uint8_t)'n');
+    std::vector<uint8_t> member(sizeof(header) + f.length, (uint8_t)'n');
+    memcpy(member.data(), header, sizeof(header));
+    member[3] = f.flag;
     member.push_back(0x00); // the field's terminator
 
     member.insert(member.end(), deflated.begin(), deflated.end());
