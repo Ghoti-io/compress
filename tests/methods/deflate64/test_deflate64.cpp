@@ -265,7 +265,7 @@ TEST(Deflate64Format, ADistanceBeyondTheWindowIsRefused) {
 /// 7-Zip's stream for a phrase, 40000 zeros and the phrase again: the second
 /// phrase is a match 40056 back, which needs distance code 30.
 TEST(Deflate64Format, ASevenZipStreamWithADistanceOverTheDeflateWindow) {
-  // 7z a -tzip -mm=Deflate64 -mx=9, the member's data. 7-Zip 24.09.
+  // 7z a -tzip -mm=Deflate64 -mx=9, the member's data. 7-Zip 25.01, on a file of our own text.
   static const char * hex =
       "e5dec911824014455143f901584663020eed8834d2a242f4400aeca87376af5e12777f4bf1ee"
       "eea7671cdbfcabe392fff1e85e4d89fc4d6d7ca6bb3a0c7d9cf3753baf3a4a95525376b1e1f1"
