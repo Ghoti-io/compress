@@ -255,11 +255,27 @@ typedef struct lzma_enc_s {
   uint16_t align_price[LZMA_ALIGN_SIZE];
   uint16_t len_price[2][LZMA_POS_STATES_MAX][ENC_LEN_PRICES];
   uint8_t len_valid[2][LZMA_POS_STATES_MAX];
+  /* The price of each plain literal in each context, kept until the other
+   * prices are rebuilt (the same staleness they have): an entry is current when
+   * its generation is the table's. */
+  uint16_t * lit_price;
+  uint32_t * lit_gen;
+  uint32_t price_gen;
+  /* The same for a literal coded against a matched byte, which depends on
+   * the byte it is matched with as well: direct-mapped, keyed whole. */
+  struct enc_mlit_s * mlit;
   struct enc_opt_s * opt;
   size_t opt_len; /* the highest node holding a price */
   struct enc_sym_s * queue;
   size_t queue_len, queue_pos;
 } lzma_enc_t;
+
+typedef struct enc_mlit_s {
+  uint32_t key;
+  uint32_t gen;
+  uint32_t price;
+} enc_mlit_t;
+#define ENC_MLIT_ENTRIES 16384u
 
 /* ---- match finder -------------------------------------------------------- */
 
@@ -767,6 +783,7 @@ static void price_rebuild(lzma_enc_t * e) {
         (uint16_t)tree_price_reverse(e, e->probs.align, LZMA_ALIGN_BITS, i);
   }
   memset(e->len_valid, 0, sizeof(e->len_valid));
+  e->price_gen++;
   e->price_dirty = 0;
   e->price_age = 0;
 }
@@ -820,7 +837,7 @@ static inline uint32_t len_price_of(
 }
 
 /* What a literal costs in the context it would be coded in. */
-static uint32_t literal_price(const lzma_enc_t * e, size_t idx,
+static uint32_t literal_price(lzma_enc_t * e, size_t idx,
     size_t position, unsigned state, uint32_t rep0) {
   unsigned byte = e->win[idx];
   unsigned prev = idx > e->hist_start ? e->win[idx - 1] : 0;
@@ -832,7 +849,12 @@ static uint32_t literal_price(const lzma_enc_t * e, size_t idx,
   int i;
   if (state >= LZMA_LIT_STATES) {
     unsigned match_byte = e->win[idx - (size_t)rep0 - 1u];
+    uint32_t key = ((uint32_t)ctx << 16) | (match_byte << 8) | byte;
+    enc_mlit_t * c = &e->mlit[(key * 2654435761u) >> (32u - 14u)];
     int same = 1;
+    if (c->gen == e->price_gen && c->key == key) {
+      return c->price;
+    }
     for (i = 7; i >= 0; i--) {
       unsigned bit = (byte >> i) & 1u;
       if (same) {
@@ -845,13 +867,22 @@ static uint32_t literal_price(const lzma_enc_t * e, size_t idx,
       }
       symbol = (symbol << 1) | bit;
     }
+    c->key = key;
+    c->gen = e->price_gen;
+    c->price = price;
   }
   else {
+    size_t slot = (ctx << 8) | byte;
+    if (e->lit_gen[slot] == e->price_gen) {
+      return e->lit_price[slot];
+    }
     for (i = 7; i >= 0; i--) {
       unsigned bit = (byte >> i) & 1u;
       price += price_bit(e, probs[symbol], bit);
       symbol = (symbol << 1) | bit;
     }
+    e->lit_price[slot] = (uint16_t)price;
+    e->lit_gen[slot] = e->price_gen;
   }
   return price;
 }
@@ -1562,11 +1593,15 @@ gcomp_status_t lzma_encoder_init(gcomp_registry_t * registry,
         alloc, (ENC_OPT_MAX + 2u * LZMA_MATCH_MAX + 4u) * sizeof(*e->opt));
     e->queue = gcomp_malloc(
         alloc, (ENC_OPT_MAX + 2u * LZMA_MATCH_MAX + 4u) * sizeof(*e->queue));
+    e->lit_price = gcomp_malloc(alloc, (((size_t)1 << (e->lc + e->lp)) << 8) * sizeof(uint16_t));
+    e->lit_gen = gcomp_calloc(alloc, (((size_t)1 << (e->lc + e->lp)) << 8), sizeof(uint32_t));
+    e->mlit = gcomp_calloc(alloc, ENC_MLIT_ENTRIES, sizeof(enc_mlit_t));
+    e->price_gen = 1;
     price_init(e);
   }
   if (!e->win || !e->head || !e->head3 || !e->head2 || !e->prev || !e->lit ||
       !e->stage || (lzma2 && !e->snap_lit) ||
-      (e->optimal && (!e->opt || !e->queue))) {
+      (e->optimal && (!e->opt || !e->queue || !e->lit_price || !e->lit_gen || !e->mlit))) {
     lzma_encoder_destroy_state(e);
     return gcomp_encoder_set_error(
         encoder, GCOMP_ERR_MEMORY, "lzma: out of memory for the encoder");
@@ -1587,6 +1622,9 @@ static void lzma_encoder_destroy_state(lzma_enc_t * e) {
   gcomp_free(e->alloc, e->prev);
   gcomp_free(e->alloc, e->lit);
   gcomp_free(e->alloc, e->snap_lit);
+  gcomp_free(e->alloc, e->lit_price);
+  gcomp_free(e->alloc, e->lit_gen);
+  gcomp_free(e->alloc, e->mlit);
   gcomp_free(e->alloc, e->opt);
   gcomp_free(e->alloc, e->queue);
   gcomp_free(e->alloc, e->stage);
