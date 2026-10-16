@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -980,6 +981,103 @@ TEST(Brotli, ByteAtATimeLibbrotli) {
   gcomp_decoder_destroy(dec);
   ASSERT_EQ(filled, text.size());
   EXPECT_EQ(memcmp(out.data(), text.data(), text.size()), 0);
+}
+
+/**
+ * The decoder's fast path takes whole commands from the input while there is
+ * room, and hands a command back to the byte-at-a-time machine whenever it
+ * meets something it does not do itself: a block switch, a dictionary word, a
+ * limit, the end of the input or of the output buffer. Where the hand-off
+ * goes wrong the output is still plausible, so this feeds libbrotli's streams
+ * (which have block switches, context maps, distance codes with postfix bits
+ * and dictionary references, none of which our level 1 writes) through every
+ * combination of small and large input and output buffers.
+ *
+ * A defect the first version of the fast path had would pass every other test
+ * in this file: a block-type count restored to its value at the start of a
+ * run of commands rather than at the start of the command that bailed, which
+ * only shows on a stream with a block switch deep into a run, read in one
+ * call.
+ */
+TEST(Brotli, LibbrotliStreamsAreReadWhateverTheChunking) {
+  const BrotliLib & lib = brotli_lib();
+  if (!lib.ok()) {
+    GTEST_SKIP() << "libbrotli is not installed";
+  }
+  // Structured records, prose, noise and a long repeat, in that order, so the
+  // block splitter has reason to switch types and the context map to differ.
+  std::vector<uint8_t> data;
+  uint32_t lcg = 12345;
+  auto next = [&lcg]() {
+    lcg = lcg * 1664525u + 1013904223u;
+    return lcg >> 8;
+  };
+  for (uint32_t i = 0; i < 6000; i++) {
+    uint32_t rec[4] = {0x00015310u + 8 * i, 7, next() % 3 == 0 ? 0x40u : 0u,
+        i};
+    const uint8_t * b = reinterpret_cast<const uint8_t *>(rec);
+    data.insert(data.end(), b, b + sizeof(rec));
+  }
+  const char * words[] = {"the", "stream", "decoder", "window", "of", "a",
+      "block", "and", "distance", "literal", "command", "context"};
+  for (int i = 0; i < 12000; i++) {
+    const char * w = words[next() % 12];
+    data.insert(data.end(), w, w + strlen(w));
+    data.push_back(i % 11 == 0 ? '\n' : ' ');
+  }
+  for (int i = 0; i < 20000; i++) {
+    data.push_back((uint8_t)next());
+  }
+  for (int i = 0; i < 20000; i++) {
+    data.push_back((uint8_t)("abcabcabd"[i % 9]));
+  }
+
+  struct Chunking {
+    size_t in;
+    size_t out;
+  };
+  const Chunking chunkings[] = {{SIZE_MAX / 2, SIZE_MAX / 2}, {17, 4096},
+      {65536, 100}, {1000, 1 << 20}, {3, 7}};
+  for (int quality : {1, 5, 9, 11}) {
+    for (int lgwin : {10, 22}) {
+      std::vector<uint8_t> enc =
+          lib_compress(data.data(), data.size(), quality, lgwin);
+      ASSERT_FALSE(enc.empty());
+      for (const Chunking & c : chunkings) {
+        gcomp_decoder_t * dec = nullptr;
+        ASSERT_EQ(gcomp_decoder_create(gcomp_registry_default(), "brotli",
+                      nullptr, &dec),
+            GCOMP_OK);
+        std::vector<uint8_t> out(data.size() + 64);
+        size_t ip = 0;
+        size_t op = 0;
+        for (;;) {
+          size_t take = std::min(enc.size() - ip, c.in);
+          size_t room = std::min(out.size() - op, c.out);
+          gcomp_buffer_t ib = {enc.data() + ip, take, 0};
+          gcomp_buffer_t ob = {out.data() + op, room, 0};
+          ASSERT_EQ(gcomp_decoder_update(dec, &ib, &ob), GCOMP_OK)
+              << "q" << quality << " lgwin " << lgwin << " in " << c.in
+              << " out " << c.out << " at " << op;
+          ip += ib.used;
+          op += ob.used;
+          if (ip == enc.size() && ib.used == 0 && ob.used == 0) {
+            break;
+          }
+        }
+        gcomp_buffer_t tail = {out.data() + op, out.size() - op, 0};
+        ASSERT_EQ(gcomp_decoder_finish(dec, &tail), GCOMP_OK);
+        op += tail.used;
+        gcomp_decoder_destroy(dec);
+        ASSERT_EQ(op, data.size())
+            << "q" << quality << " lgwin " << lgwin << " in " << c.in
+            << " out " << c.out;
+        EXPECT_EQ(memcmp(out.data(), data.data(), data.size()), 0)
+            << "q" << quality << " lgwin " << lgwin << " in " << c.in
+            << " out " << c.out;
+      }
+    }
+  }
 }
 
 int main(int argc, char ** argv) {

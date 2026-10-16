@@ -61,7 +61,15 @@ typedef struct brotli_huff_s {
   uint16_t first[16];
   uint16_t offset[16];
   uint16_t * syms;
+  /* The fast decode table, in the same allocation as syms: indexed by the
+   * next fast_bits stream bits (first bit lowest), each entry holds the code
+   * length in bits 10 and up and the symbol below, or 0 when the code is
+   * longer than fast_bits. NULL for a single-symbol code. */
+  uint16_t * fast;
+  uint32_t fast_mask;
 } brotli_huff_t;
+
+#define BROTLI_FAST_BITS 10
 
 typedef struct brotli_sym_s {
   uint32_t code;

@@ -88,6 +88,7 @@ static int huff_build(const gcomp_allocator_t * alloc, brotli_huff_t * h,
   uint32_t code;
   int filled[16];
   int cursor;
+  int fbits;
 
   brotli_huff_free(alloc, h);
   memset(count, 0, sizeof(count));
@@ -130,7 +131,9 @@ static int huff_build(const gcomp_allocator_t * alloc, brotli_huff_t * h,
     h->count[i] = (uint16_t)count[i];
   }
 
-  h->syms = gcomp_calloc(alloc, (size_t)nnz, sizeof(uint16_t));
+  fbits = maxb < BROTLI_FAST_BITS ? maxb : BROTLI_FAST_BITS;
+  h->syms = gcomp_calloc(
+      alloc, (size_t)nnz + ((size_t)1 << fbits), sizeof(uint16_t));
   if (!h->syms) {
     tree_error(t, GCOMP_ERR_MEMORY, "brotli: out of memory");
     return BR_FAIL;
@@ -146,6 +149,28 @@ static int huff_build(const gcomp_allocator_t * alloc, brotli_huff_t * h,
     if (len != 0) {
       h->syms[h->offset[len] + filled[len]] = (uint16_t)i;
       filled[len]++;
+    }
+  }
+  /* The fast table. Codes are canonical, assigned in increasing length and
+   * then symbol order, which is the order syms is in; the stream carries each
+   * code most significant bit first, so the table is indexed by the code's
+   * bits reversed. */
+  h->fast = h->syms + nnz;
+  h->fast_mask = (1u << fbits) - 1u;
+  for (i = 1; i <= fbits; i++) {
+    int k;
+    for (k = 0; k < count[i]; k++) {
+      uint32_t c = (uint32_t)h->first[i] + (uint32_t)k;
+      uint32_t rev = 0;
+      uint32_t j;
+      int b;
+      for (b = 0; b < i; b++) {
+        rev |= ((c >> b) & 1u) << (i - 1 - b);
+      }
+      for (j = rev; j <= h->fast_mask; j += 1u << i) {
+        h->fast[j] = (uint16_t)(((unsigned)i << 10) |
+                                h->syms[h->offset[i] + k]);
+      }
     }
   }
   h->max_bits = maxb;

@@ -1192,6 +1192,477 @@ static int ring_byte(brotli_dec_t * st, uint64_t distance, uint8_t * out) {
   return 0;
 }
 
+/* The fast path.
+ *
+ * phase_command below is a resumable machine: every symbol and every output
+ * byte is a step that can stop for more input or more room and pick up again,
+ * which costs a state write and a dispatch per byte. fast_run decodes whole
+ * commands from locals instead, while the input holds a few words past the
+ * bit position and the output has room. It never reports an error and never
+ * stops for input: anything unusual (a corrupt code, a dictionary reference,
+ * a limit, a block switch, the end of the input or of the room) hands the
+ * command back to the machine at a step it already has, with every field the
+ * machine reads at that step set, and the machine does what it always did.
+ * So the two cannot disagree about what is an error, only about speed.
+ *
+ * Bits are held in a 64-bit local refilled eight bytes at a time. On the way
+ * out the whole bytes still held are unread, so the reader's invariant
+ * (fewer than eight bits held between steps) is the one the machine expects.
+ */
+static inline uint64_t fr_load64(const uint8_t * p) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  uint64_t v;
+  memcpy(&v, p, 8);
+  return v;
+#else
+  return (uint64_t)p[0] | (uint64_t)p[1] << 8 | (uint64_t)p[2] << 16 |
+         (uint64_t)p[3] << 24 | (uint64_t)p[4] << 32 | (uint64_t)p[5] << 40 |
+         (uint64_t)p[6] << 48 | (uint64_t)p[7] << 56;
+#endif
+}
+
+/* Top the accumulator up to at least 56 bits. Needs eight readable bytes at
+ * pos. The bits above nb are the next input bits, already correct, so the
+ * next refill ORs the same values over them. */
+#define FR_REFILL()                                                            \
+  do {                                                                         \
+    acc |= fr_load64(data + pos) << nb;                                        \
+    pos += (size_t)((63 - nb) >> 3);                                           \
+    nb |= 56;                                                                  \
+  } while (0)
+
+static int fr_slow_sym(const brotli_huff_t * h, uint64_t * acc, int * nb) {
+  uint32_t code = 0;
+  int n;
+  for (n = 1; n <= h->max_bits; n++) {
+    code = (code << 1) | (uint32_t)((*acc >> (n - 1)) & 1u);
+    if (h->count[n] != 0 && code >= h->first[n] &&
+        code < (uint32_t)h->first[n] + h->count[n]) {
+      *acc >>= n;
+      *nb -= n;
+      return h->syms[h->offset[n] + (code - h->first[n])];
+    }
+  }
+  return -1;
+}
+
+/* A symbol from the held bits (at least 15 of them), or -1 and nothing taken. */
+static inline int fr_sym(const brotli_huff_t * h, uint64_t * acc, int * nb) {
+  unsigned e;
+  if (h->simple >= 0) {
+    return h->simple;
+  }
+  if (!h->fast) {
+    return -1;
+  }
+  e = h->fast[*acc & h->fast_mask];
+  if (e != 0) {
+    int l = (int)(e >> 10);
+    *acc >>= l;
+    *nb -= l;
+    return (int)(e & 1023u);
+  }
+  return fr_slow_sym(h, acc, nb);
+}
+
+static int fast_run(brotli_dec_t * st, gcomp_buffer_t * out) {
+  const uint8_t * data = st->br.data;
+  const size_t size = st->br.size;
+  size_t pos = st->br.pos;
+  uint64_t acc = st->br.acc;
+  int nb = st->br.nbits;
+  const size_t pos0 = pos;
+  uint8_t * dst = (uint8_t *)out->data;
+  size_t used = out->used;
+  const size_t osize = out->size;
+  uint8_t * ring = st->ring;
+  const size_t window = st->window;
+  size_t rp = st->ring_pos;
+  uint32_t p1 = st->p1;
+  uint32_t p2 = st->p2;
+  uint64_t produced = st->produced;
+  uint32_t mremain = st->mremain;
+  uint32_t blen_i = st->blen[CAT_I];
+  uint32_t blen_l = st->blen[CAT_L];
+  const uint8_t * lut0 = brotli_lut0();
+  const uint8_t * lut1 = brotli_lut1();
+  const uint8_t * lut2 = brotli_lut2();
+  int cstep = 0;
+  int done = 0;
+  uint32_t copy_len = 0;
+  uint32_t lit_left = 0;
+  int implicit = 0;
+  uint64_t distance = 0;
+  uint32_t copy_total = 0;
+  uint32_t copy_pos = 0;
+  int did_setup = 0;
+  uint64_t avail;
+
+  if (!ring || window == 0 || !data || size - pos < 24 || used >= osize ||
+      mremain == 0) {
+    return 0;
+  }
+
+  for (;;) {
+    size_t cp_pos;
+    uint64_t cp_acc;
+    int cp_nb;
+    uint32_t cp_blen_i;
+    uint32_t ins_len;
+    int sym;
+    int ic;
+    int cc;
+    int btype;
+    uint32_t t;
+
+    if (mremain == 0 || used >= osize || size - pos < 24) {
+      break;
+    }
+    /* The room: output space, the output limit, the expansion-ratio limit.
+     * The ratio is taken at the position the command starts, which is never
+     * later than where a byte would be written, so it can only be stricter
+     * than the machine's; where it binds the machine takes over. */
+    avail = osize - used;
+    if (st->max_out != 0) {
+      uint64_t left = st->max_out > produced ? st->max_out - produced : 0;
+      if (left < avail) {
+        avail = left;
+      }
+    }
+    if (st->max_ratio != 0) {
+      uint64_t in_bytes = st->input_total + (uint64_t)pos;
+      uint64_t allowed;
+      if (in_bytes == 0) {
+        break;
+      }
+      if (st->max_ratio <= UINT64_MAX / in_bytes) {
+        allowed = st->max_ratio * in_bytes;
+        allowed = allowed > produced ? allowed - produced : 0;
+        if (allowed < avail) {
+          avail = allowed;
+        }
+      }
+    }
+    if (avail == 0) {
+      break;
+    }
+
+    cp_pos = pos;
+    cp_acc = acc;
+    cp_nb = nb;
+    cp_blen_i = blen_i;
+
+    /* Header: insert-and-copy symbol and its two extra-bit fields. */
+    if (nb < 32) {
+      FR_REFILL();
+    }
+    btype = st->rb[CAT_I * 2 + 1];
+    if ((unsigned)btype >= (unsigned)st->nins) {
+      goto bail0;
+    }
+    if (st->ntypes[CAT_I] >= 2 && blen_i == 0) {
+      goto bail0;
+    }
+    sym = fr_sym(&st->ins[btype], &acc, &nb);
+    if (sym < 0 || sym >= 704) {
+      goto bail0;
+    }
+    {
+      static const uint8_t bins[11] = {0, 0, 0, 0, 8, 8, 0, 16, 8, 16, 16};
+      static const uint8_t bco[11] = {0, 8, 0, 8, 0, 8, 16, 0, 16, 8, 16};
+      int cell = sym >> 6;
+      int within = sym & 63;
+      ic = bins[cell] + (within >> 3);
+      cc = bco[cell] + (within & 7);
+      implicit = sym < 128;
+    }
+    if (nb < 48) {
+      FR_REFILL();
+    }
+    t = (uint32_t)(acc & ((1u << k_ins_extra[ic]) - 1u));
+    acc >>= k_ins_extra[ic];
+    nb -= k_ins_extra[ic];
+    ins_len = k_ins_base[ic] + t;
+    t = (uint32_t)(acc & ((1u << k_copy_extra[cc]) - 1u));
+    acc >>= k_copy_extra[cc];
+    nb -= k_copy_extra[cc];
+    copy_len = k_copy_base[cc] + t;
+    if (ins_len > mremain) {
+      goto bail0;
+    }
+    blen_i--;
+    st->ins_len = ins_len;
+
+    /* Literals. */
+    lit_left = ins_len;
+    if (lit_left != 0) {
+      int bl = st->rb[CAT_L * 2 + 1];
+      int multi = st->ntypes[CAT_L] >= 2;
+      int mode;
+      const uint8_t * cm;
+      uint64_t n = lit_left < avail ? lit_left : avail;
+      uint64_t k;
+      if ((unsigned)bl >= (unsigned)st->ntypes[CAT_L]) {
+        cstep = 5;
+        goto handoff;
+      }
+      mode = st->cmode[bl];
+      cm = st->cmap_l + 64 * bl;
+      for (k = 0; k < n; k++) {
+        unsigned cid;
+        unsigned ti;
+        int b;
+        if (nb < 16) {
+          if (pos + 8 > size) {
+            break;
+          }
+          FR_REFILL();
+        }
+        if (multi && blen_l == 0) {
+          break;
+        }
+        if (mode == 0) {
+          cid = p1 & 0x3fu;
+        }
+        else if (mode == 1) {
+          cid = p1 >> 2;
+        }
+        else if (mode == 2) {
+          cid = (unsigned)lut0[p1] | (unsigned)lut1[p2];
+        }
+        else {
+          cid = ((unsigned)lut2[p1] << 3) | (unsigned)lut2[p2];
+        }
+        ti = cm[cid];
+        if (ti >= (unsigned)st->nlit) {
+          break;
+        }
+        b = fr_sym(&st->lit[ti], &acc, &nb);
+        if (b < 0) {
+          break;
+        }
+        blen_l--;
+        dst[used++] = (uint8_t)b;
+        ring[rp] = (uint8_t)b;
+        if (++rp == window) {
+          rp = 0;
+        }
+        p2 = p1;
+        p1 = (uint32_t)b;
+      }
+      produced += k;
+      mremain -= (uint32_t)k;
+      avail -= k;
+      lit_left -= (uint32_t)k;
+      if (lit_left != 0) {
+        cstep = 5;
+        goto handoff;
+      }
+    }
+
+    /* Distance. */
+    if (mremain == 0) {
+      done++;
+      continue;
+    }
+    cp_pos = pos;
+    cp_acc = acc;
+    cp_nb = nb;
+    {
+      uint32_t dsym = 0;
+      uint64_t max_dist;
+      if (implicit) {
+        distance = st->dist_rb[0];
+      }
+      else {
+        int bd = st->rb[CAT_D * 2 + 1];
+        int dcid;
+        int ti;
+        if (nb < 32) {
+          if (pos + 8 > size) {
+            goto bail5;
+          }
+          FR_REFILL();
+        }
+        if ((unsigned)bd >= (unsigned)st->ntypes[CAT_D] ||
+            (st->ntypes[CAT_D] >= 2 && st->blen[CAT_D] == 0)) {
+          goto bail5;
+        }
+        dcid = copy_len <= 2 ? 0 : copy_len == 3 ? 1 : copy_len == 4 ? 2 : 3;
+        ti = st->cmap_d[4 * bd + dcid];
+        if (ti >= st->ndist) {
+          goto bail5;
+        }
+        sym = fr_sym(&st->dist[ti], &acc, &nb);
+        if (sym < 0 || sym >= st->dist_alpha) {
+          goto bail5r;
+        }
+        dsym = (uint32_t)sym;
+        if (sym < 16) {
+          if (short_dist(sym, st->dist_rb, &distance) != 0) {
+            goto bail5r;
+          }
+        }
+        else if (sym < 16 + st->ndirect) {
+          distance = (uint64_t)(sym - 15);
+        }
+        else {
+          uint32_t xcode = (uint32_t)sym - (uint32_t)st->ndirect - 16u;
+          int dn = 1 + (int)(xcode >> (st->npostfix + 1));
+          uint32_t bits;
+          uint32_t hcode;
+          uint32_t lcode;
+          uint64_t offset;
+          if (dn > 24) {
+            goto bail5r;
+          }
+          if (nb < dn) {
+            if (pos + 8 > size) {
+              goto bail5r;
+            }
+            FR_REFILL();
+          }
+          bits = (uint32_t)(acc & ((1u << dn) - 1u));
+          acc >>= dn;
+          nb -= dn;
+          hcode = xcode >> st->npostfix;
+          lcode = xcode & ((1u << st->npostfix) - 1u);
+          offset = ((2ull + (uint64_t)(hcode & 1u)) << dn) - 4ull;
+          distance = ((offset + bits) << st->npostfix) + lcode +
+                     (uint64_t)st->ndirect + 1ull;
+        }
+      }
+      max_dist = produced < window ? produced : (uint64_t)window;
+      if (distance == 0 || distance > max_dist || copy_len > mremain) {
+        goto bail5r;
+      }
+      if (!implicit) {
+        st->blen[CAT_D]--;
+        if (dsym != 0) {
+          push_dist(st, (uint32_t)distance);
+        }
+      }
+    }
+
+    /* The copy, from the ring. */
+    {
+      uint64_t n = copy_len < avail ? copy_len : avail;
+      uint64_t left = n;
+      size_t sp = rp >= distance ? rp - (size_t)distance
+                                 : rp + window - (size_t)distance;
+      while (left != 0) {
+        size_t c = (size_t)left;
+        size_t room = window - rp;
+        if (window - sp < c) {
+          c = window - sp;
+        }
+        if (room < c) {
+          c = room;
+        }
+        if (sp == rp) {
+          /* distance == window: the bytes are already where they go. */
+        }
+        else if (sp < rp && (size_t)distance < c) {
+          size_t i;
+          for (i = 0; i < c; i++) {
+            ring[rp + i] = ring[sp + i];
+          }
+        }
+        else if (sp < rp) {
+          memcpy(ring + rp, ring + sp, c);
+        }
+        else {
+          memmove(ring + rp, ring + sp, c);
+        }
+        memcpy(dst + used, ring + rp, c);
+        used += c;
+        rp += c;
+        if (rp == window) {
+          rp = 0;
+        }
+        sp += c;
+        if (sp == window) {
+          sp = 0;
+        }
+        left -= c;
+      }
+      if (n >= 2) {
+        p1 = dst[used - 1];
+        p2 = dst[used - 2];
+      }
+      else if (n == 1) {
+        p2 = p1;
+        p1 = dst[used - 1];
+      }
+      produced += n;
+      mremain -= (uint32_t)n;
+      avail -= n;
+      if (n < copy_len) {
+        copy_total = copy_len;
+        copy_pos = (uint32_t)n;
+        did_setup = 1;
+        cstep = 10;
+        goto handoff;
+      }
+    }
+    done++;
+    continue;
+
+  bail5r:
+    /* Back to just before the distance code, so the machine reads it. */
+    pos = cp_pos;
+    acc = cp_acc;
+    nb = cp_nb;
+  bail5:
+    lit_left = 0;
+    cstep = 5;
+    goto handoff;
+
+  bail0:
+    pos = cp_pos;
+    acc = cp_acc;
+    nb = cp_nb;
+    blen_i = cp_blen_i;
+    cstep = 0;
+    goto handoff;
+  }
+  cstep = 0;
+
+handoff:
+  /* Unread the whole bytes still held, so fewer than eight bits remain. */
+  pos -= (size_t)(nb >> 3);
+  nb &= 7;
+  acc &= ((uint64_t)1 << nb) - 1u;
+  st->br.pos = pos;
+  st->br.acc = acc;
+  st->br.nbits = nb;
+  out->used = used;
+  st->ring_pos = rp;
+  st->p1 = (uint8_t)p1;
+  st->p2 = (uint8_t)p2;
+  st->produced = produced;
+  st->mremain = mremain;
+  st->blen[CAT_I] = blen_i;
+  st->blen[CAT_L] = blen_l;
+  st->cstep = cstep;
+  if (cstep == 5) {
+    st->copy_len = copy_len;
+    st->implicit = implicit;
+    st->lit_left = lit_left;
+    st->lstep = 0;
+  }
+  else if (cstep == 10) {
+    st->copy_len = copy_len;
+    st->implicit = implicit;
+    st->distance = distance;
+    st->copy_is_dict = 0;
+    st->copy_total = (int)copy_total;
+    st->copy_pos = (int)copy_pos;
+    st->did_setup = did_setup;
+  }
+  return (cstep != 0 || done > 0 || pos != pos0) ? 1 : 0;
+}
+
 static int phase_command(brotli_dec_t * st, gcomp_buffer_t * out) {
   for (;;) {
     int r;
@@ -1201,6 +1672,9 @@ static int phase_command(brotli_dec_t * st, gcomp_buffer_t * out) {
     case 0:
       if (st->mremain == 0) {
         return end_block(st);
+      }
+      if (fast_run(st, out)) {
+        break;
       }
       st->sw = 0;
       st->cstep = 1;
