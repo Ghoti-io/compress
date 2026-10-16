@@ -87,7 +87,7 @@ Bytes inverse(const Bytes & last, uint32_t orig) {
 class Bwt {
 public:
   explicit Bwt(size_t max_n)
-      : s_(2 * max_n + 8), sa_(2 * max_n + 8) {
+      : s_(max_n + 8), sa_(max_n + 8) {
     scratch_.s = s_.data();
     scratch_.sa = sa_.data();
   }

@@ -577,7 +577,7 @@ typedef struct bz_enc_s {
 
 /* The most the sort's scratch and the Huffman builder's can come to for a block
  * of n bytes: the sort holds a byte per symbol of each level of its recursion
- * (2n + 1, halving) and a pair of bucket arrays per level of the size of that
+ * (n + 1, halving) and a pair of bucket arrays per level of the size of that
  * level's alphabet, which is at most its length, so under 8 bytes a symbol;
  * and the builder a few hundred kilobytes. Most of it is never touched, and
  * untouched pages cost nothing. */
@@ -608,8 +608,8 @@ static bz_job_t * job_create(bz_enc_t * e) {
   j->blk = gcomp_malloc(e->alloc, n + 8u);
   j->last = gcomp_malloc(e->alloc, n + 8u);
   j->mtfv = gcomp_malloc(e->alloc, (n + 8u) * sizeof(uint16_t));
-  j->bwt.s = gcomp_malloc(e->alloc, (2u * n + 8u) * sizeof(uint16_t));
-  j->bwt.sa = gcomp_malloc(e->alloc, (2u * n + 8u) * sizeof(int32_t));
+  j->bwt.s = gcomp_malloc(e->alloc, (n + 8u) * sizeof(uint16_t));
+  j->bwt.sa = gcomp_malloc(e->alloc, (n + 8u) * sizeof(int32_t));
   /* One block's worst case: at most n + 1 symbols of at most 17 bits, and the
    * tables and selectors, which together are under 25 KB. */
   j->w.buf = gcomp_malloc(e->alloc, e->stage_cap);
