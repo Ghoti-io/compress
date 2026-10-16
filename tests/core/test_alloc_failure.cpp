@@ -865,6 +865,10 @@ void add_scenarios(std::vector<Scenario> & out) {
       brotli_level_window(2, 22), brotli_long, Mode::StreamingTiny, false});
   out.push_back({"brotli/L4/mixed-long", "brotli",
       brotli_level_window(4, 22), brotli_long, Mode::StreamingTiny, false});
+  out.push_back({"brotli/L5/mixed-long", "brotli",
+      brotli_level_window(5, 22), brotli_long, Mode::StreamingTiny, false});
+  out.push_back({"brotli/L5/context", "brotli", brotli_level_window(5, 22),
+      brotli_ctx, Mode::StreamingTiny, false});
   out.push_back({"brotli/L1/buffer", "brotli", brotli_level(1), mixed,
       Mode::Buffer, false});
   out.push_back({"brotli/L0/buffer", "brotli", brotli_level(0), rnd,

@@ -1013,6 +1013,53 @@ static void find_match(const uint32_t * head, const uint32_t * prev,
   }
 }
 
+/* Every command is checked against the bytes before it is believed. */
+static int verify_cmds(const uint8_t * base, size_t hist, size_t len,
+    uint32_t window, const brotli_cmd_t * cmds, int ncmd) {
+  size_t p = 0;
+  const uint8_t * data = base + hist;
+  int c;
+  for (c = 0; c < ncmd; c++) {
+    size_t i;
+    if (cmds[c].at != p) {
+      return 0;
+    }
+    p += cmds[c].insert;
+    if (p > len) {
+      return 0;
+    }
+    if (cmds[c].tail) {
+      continue;
+    }
+    if (cmds[c].dist == 0 || cmds[c].dist > p + hist ||
+        cmds[c].dist > window) {
+      return 0;
+    }
+    if (p + cmds[c].copy > len) {
+      return 0;
+    }
+    i = 0;
+    while (i + 8u <= cmds[c].copy) {
+      uint64_t a;
+      uint64_t b;
+      memcpy(&a, data + p + i, sizeof(a));
+      memcpy(&b, (data + p) - cmds[c].dist + i, sizeof(b));
+      if (a != b) {
+        return 0;
+      }
+      i += 8u;
+    }
+    while (i < cmds[c].copy) {
+      if (data[p + i] != *((data + p) - cmds[c].dist + i)) {
+        return 0;
+      }
+      i++;
+    }
+    p += cmds[c].copy;
+  }
+  return p == len && ncmd != 0;
+}
+
 /* The commands for data[hist .. hist + len), which may copy from anywhere in
  * data[0 .. hist + len) that the window allows. head and prev are the match
  * finder's, and are left holding the positions of this chunk, so that the next
@@ -1154,52 +1201,8 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * base,
     cmds[ncmd].tail = 1;
     ncmd++;
   }
-  {
-    /* Every command is checked against the bytes before it is believed. */
-    size_t p = 0;
-    const uint8_t * data = base + hist;
-    int c;
-    for (c = 0; c < ncmd; c++) {
-      size_t i;
-      if (cmds[c].at != p) {
-        goto done;
-      }
-      p += cmds[c].insert;
-      if (p > len) {
-        goto done;
-      }
-      if (cmds[c].tail) {
-        continue;
-      }
-      if (cmds[c].dist == 0 || cmds[c].dist > p + hist ||
-          cmds[c].dist > window) {
-        goto done;
-      }
-      if (p + cmds[c].copy > len) {
-        goto done;
-      }
-      i = 0;
-      while (i + 8u <= cmds[c].copy) {
-        uint64_t a;
-        uint64_t b;
-        memcpy(&a, data + p + i, sizeof(a));
-        memcpy(&b, (data + p) - cmds[c].dist + i, sizeof(b));
-        if (a != b) {
-          goto done;
-        }
-        i += 8u;
-      }
-      while (i < cmds[c].copy) {
-        if (data[p + i] != *((data + p) - cmds[c].dist + i)) {
-          goto done;
-        }
-        i++;
-      }
-      p += cmds[c].copy;
-    }
-    if (p != len || ncmd == 0) {
-      goto done;
-    }
+  if (!verify_cmds(base, hist, len, window, cmds, ncmd)) {
+    goto done;
   }
   ok = 1;
 done:
@@ -1210,6 +1213,608 @@ done:
   *cmds_out = cmds;
   *ncmd_out = ncmd;
   return 0;
+}
+
+static int resolve_cmd(const brotli_cmd_t * cmd, const uint32_t rb[4], int fresh,
+    int imp[24][24], int exp[24][24], int * ic, int * implicit,
+    int * dist_sym, uint32_t * ins_extra, int * ins_n, uint32_t * copy_extra,
+    int * copy_n, uint32_t * dist_extra, int * dist_n);
+
+/* The optimal parse (level 5): the cheapest way through the chunk by a price
+ * for every symbol a command can use, found by a shortest-path pass over the
+ * positions. A node is a position; an edge is one literal or one match (with
+ * the literals before it priced as the command's insert length, which is why a
+ * node keeps the run of literals that led to it). Each node also keeps the
+ * decoder's four last distances along its best path, so that a match at one of
+ * them is priced as the cheap thing it is.
+ *
+ * The prices come from the symbols a previous parse used. The first pass has
+ * none, so it starts from a guess, and it is the pass that searches: what the
+ * match finder offered at each position is kept, and the later passes price
+ * that same offer again with the statistics of the pass before. */
+#ifndef BROTLI_OPT_PASSES
+#define BROTLI_OPT_PASSES 3
+#endif
+#define BROTLI_OPT_VARIANTS 2
+#define BROTLI_OPT_CANDS 12
+#define BROTLI_OPT_TAB 2048
+#define BROTLI_OPT_INF 1e30f
+
+typedef struct brotli_opt_s {
+  float cost;
+  uint32_t rep[4];
+  uint32_t run;   /* literals since the last match on the best path here */
+  uint32_t mlen;  /* the match that arrives here, 0 for a literal */
+  uint32_t mdist;
+  uint32_t mins;  /* the literals that came before that match */
+} brotli_opt_t;
+
+typedef struct brotli_price_s {
+  float lit[256];
+  float ic[704];
+  float dist[64];
+} brotli_price_t;
+
+typedef struct brotli_optc_s {
+  const gcomp_allocator_t * alloc;
+  const uint8_t * base;
+  size_t hist;
+  size_t len;
+  size_t total;
+  uint32_t window;
+  const brotli_params_t * par;
+  uint32_t * head;
+  uint32_t * prev;
+  brotli_opt_t * nodes;
+  uint32_t * off;  /* off[i] .. off[i + 1]: what was offered at hist + i */
+  uint32_t * pool_len;
+  uint32_t * pool_dist;
+  size_t pool_n;
+  size_t pool_cap;
+  brotli_price_t pr;
+  float litscale;
+  int imp[24][24];
+  int exp[24][24];
+  uint8_t ins_tab[BROTLI_OPT_TAB];
+  uint8_t copy_tab[BROTLI_OPT_TAB];
+} brotli_optc_t;
+
+static int opt_ins_code(const brotli_optc_t * o, uint32_t n, int * nb) {
+  int code = 23;
+  uint32_t e = 0;
+  if (n < BROTLI_OPT_TAB) {
+    code = o->ins_tab[n];
+  }
+  else {
+    (void)length_code(n, k_ins_base, k_ins_extra, &code, &e, nb);
+  }
+  *nb = (int)k_ins_extra[code];
+  return code;
+}
+
+static int opt_copy_code(const brotli_optc_t * o, uint32_t n, int * nb) {
+  int code = 23;
+  uint32_t e = 0;
+  if (n < BROTLI_OPT_TAB) {
+    code = o->copy_tab[n];
+  }
+  else {
+    (void)length_code(n, k_copy_base, k_copy_extra, &code, &e, nb);
+  }
+  *nb = (int)k_copy_extra[code];
+  return code;
+}
+
+/* Prices, in bits, from how often each symbol was used. */
+static float opt_bits(uint32_t f, uint32_t total, int n) {
+  return log2f(((float)total + 0.5f * (float)n) / ((float)f + 0.5f));
+}
+
+static void opt_prices(brotli_optc_t * o, const brotli_cmd_t * cmds, int ncmd,
+    const uint32_t rb0[4]) {
+  uint32_t lf[256];
+  uint32_t cf[704];
+  uint32_t df[64];
+  uint32_t lt = 0;
+  uint32_t ct = 0;
+  uint32_t dt = 0;
+  uint32_t rb[4];
+  const uint8_t * data = o->base + o->hist;
+  int c;
+  int i;
+  memset(lf, 0, sizeof(lf));
+  memset(cf, 0, sizeof(cf));
+  memset(df, 0, sizeof(df));
+  memcpy(rb, rb0, sizeof(rb));
+  for (c = 0; c < ncmd; c++) {
+    int ic = 0;
+    int implicit = 0;
+    int ds = 0;
+    uint32_t e0;
+    uint32_t e1;
+    uint32_t e2;
+    int n0;
+    int n1;
+    int n2;
+    uint32_t k;
+    for (k = 0; k < cmds[c].insert; k++) {
+      lf[data[cmds[c].at + k]]++;
+    }
+    lt += cmds[c].insert;
+    if (resolve_cmd(&cmds[c], rb, 0, o->imp, o->exp, &ic, &implicit, &ds, &e0,
+            &n0, &e1, &n1, &e2, &n2) != 0 || ic < 0 || ic >= 704) {
+      continue;
+    }
+    cf[ic]++;
+    ct++;
+    if (!cmds[c].tail && !implicit && ds >= 0 && ds < 64) {
+      df[ds]++;
+      dt++;
+      if (ds != 0) {
+        push_dist(rb, cmds[c].dist);
+      }
+    }
+  }
+  for (i = 0; i < 256; i++) {
+    o->pr.lit[i] = opt_bits(lf[i], lt, 256);
+  }
+  for (i = 0; i < 704; i++) {
+    o->pr.ic[i] = opt_bits(cf[i], ct, 704);
+  }
+  for (i = 0; i < 64; i++) {
+    o->pr.dist[i] = opt_bits(df[i], dt, 64);
+  }
+}
+
+/* What the first pass assumes: literals as often as they occur in the chunk,
+ * a command a few bits, a distance by its magnitude. */
+static void opt_prior(brotli_optc_t * o) {
+  uint32_t lf[256];
+  const uint8_t * data = o->base + o->hist;
+  size_t i;
+  memset(lf, 0, sizeof(lf));
+  for (i = 0; i < o->len; i++) {
+    lf[data[i]]++;
+  }
+  for (i = 0; i < 256; i++) {
+    o->pr.lit[i] = opt_bits(lf[i], (uint32_t)o->len, 256);
+  }
+  for (i = 0; i < 704; i++) {
+    o->pr.ic[i] = 7.0f;
+  }
+  for (i = 0; i < 64; i++) {
+    o->pr.dist[i] = i == 0 ? 1.5f : (i < 16 ? 5.0f : 4.0f);
+  }
+}
+
+static int opt_pool_add(brotli_optc_t * o, uint32_t len, uint32_t dist) {
+  if (o->pool_n == o->pool_cap) {
+    size_t cap = o->pool_cap * 2u;
+    uint32_t * nl = gcomp_malloc(o->alloc, cap * sizeof(*nl));
+    uint32_t * nd = gcomp_malloc(o->alloc, cap * sizeof(*nd));
+    if (!nl || !nd) {
+      gcomp_free(o->alloc, nl);
+      gcomp_free(o->alloc, nd);
+      return -1;
+    }
+    memcpy(nl, o->pool_len, o->pool_n * sizeof(*nl));
+    memcpy(nd, o->pool_dist, o->pool_n * sizeof(*nd));
+    gcomp_free(o->alloc, o->pool_len);
+    gcomp_free(o->alloc, o->pool_dist);
+    o->pool_len = nl;
+    o->pool_dist = nd;
+    o->pool_cap = cap;
+  }
+  o->pool_len[o->pool_n] = len;
+  o->pool_dist[o->pool_n] = dist;
+  o->pool_n++;
+  return 0;
+}
+
+/* The price of naming distance d after the four in rep: its symbol, its extra
+ * bits, and which symbol it was (for the implicit form). */
+static float opt_dist_price(const brotli_optc_t * o, uint32_t d,
+    const uint32_t rep[4]) {
+  int sym = 0;
+  uint32_t extra = 0;
+  int nb = 0;
+  if (short_dist_sym(d, rep, &sym) == 0) {
+    return o->pr.dist[sym];
+  }
+  if (long_dist_sym(d, &sym, &extra, &nb) != 0) {
+    return BROTLI_OPT_INF;
+  }
+  return o->pr.dist[sym] + (float)nb;
+}
+
+/* Reach rel + l from rel by a match of length l at distance d, if that is
+ * cheaper than what reaches it now. dprice is the distance's price. */
+static void opt_edge(brotli_optc_t * o, size_t rel, uint32_t l, uint32_t d,
+    float dprice) {
+  const brotli_opt_t * f = &o->nodes[rel];
+  brotli_opt_t * t = &o->nodes[rel + l];
+  int ni;
+  int nc;
+  int ic = opt_ins_code(o, f->run, &ni);
+  int cc = opt_copy_code(o, l, &nc);
+  float c = f->cost + (float)(ni + nc);
+  if (d == f->rep[0] && ic <= 7 && cc <= 15 && o->imp[ic][cc] >= 0) {
+    c += o->pr.ic[o->imp[ic][cc]];
+  }
+  else {
+    if (o->exp[ic][cc] < 0) {
+      return;
+    }
+    c += o->pr.ic[o->exp[ic][cc]] + dprice;
+  }
+  if (c >= t->cost) {
+    return;
+  }
+  t->cost = c;
+  memcpy(t->rep, f->rep, sizeof(t->rep));
+  if (d != f->rep[0]) {
+    push_dist(t->rep, d);
+  }
+  t->run = 0;
+  t->mlen = l;
+  t->mdist = d;
+  t->mins = f->run;
+}
+
+static void opt_literal(brotli_optc_t * o, size_t rel) {
+  const brotli_opt_t * f = &o->nodes[rel];
+  brotli_opt_t * t = &o->nodes[rel + 1u];
+  float c = f->cost + o->litscale * o->pr.lit[o->base[o->hist + rel]];
+  if (c >= t->cost) {
+    return;
+  }
+  t->cost = c;
+  memcpy(t->rep, f->rep, sizeof(t->rep));
+  t->run = f->run + 1u;
+  t->mlen = 0;
+  t->mdist = 0;
+  t->mins = 0;
+}
+
+/* One pass over the chunk. When search is set the match finder is asked at
+ * each position and its answers are kept; otherwise the kept answers are
+ * priced again. */
+static int opt_pass(brotli_optc_t * o, int search, const uint32_t rb0[4]) {
+  const size_t total = o->total;
+  size_t rel;
+  size_t i;
+  int misses = 0;
+  for (i = 0; i <= o->len; i++) {
+    o->nodes[i].cost = BROTLI_OPT_INF;
+  }
+  o->nodes[0].cost = 0.0f;
+  memcpy(o->nodes[0].rep, rb0, sizeof(o->nodes[0].rep));
+  o->nodes[0].run = 0;
+  o->nodes[0].mlen = 0;
+  o->nodes[0].mdist = 0;
+  o->nodes[0].mins = 0;
+  if (search) {
+    o->pool_n = 0;
+  }
+  rel = 0;
+  while (rel < o->len) {
+    const size_t p = o->hist + rel;
+    const brotli_opt_t * f = &o->nodes[rel];
+    uint32_t cl[4 + BROTLI_OPT_CANDS];
+    uint32_t cd[4 + BROTLI_OPT_CANDS];
+    float cp[4 + BROTLI_OPT_CANDS];
+    int nrep = 0;
+    int nc = 0;
+    int r;
+    int k;
+    uint32_t longest = 0;
+    int longest_k = 0;
+    if (search) {
+      o->off[rel] = (uint32_t)o->pool_n;
+    }
+    for (r = 0; r < 4; r++) {
+      uint32_t d = f->rep[r];
+      uint32_t l;
+      int dup = 0;
+      int q;
+      if (d == 0 || d > p || d > o->window) {
+        continue;
+      }
+      for (q = 0; q < r; q++) {
+        dup |= f->rep[q] == d;
+      }
+      if (dup) {
+        continue;
+      }
+      l = (uint32_t)match_len(o->base, total, p - d, p);
+      if (l < BROTLI_MIN_MATCH) {
+        continue;
+      }
+      cl[nc] = l;
+      cd[nc] = d;
+      cp[nc] = opt_dist_price(o, d, f->rep);
+      nc++;
+    }
+    nrep = nc;
+    if (search) {
+      uint32_t cur = o->head[hash4(o->base + p)];
+      int steps = 0;
+      uint32_t best = 0;
+      int got = 0;
+      if (p + BROTLI_MIN_MATCH <= total) {
+        while (cur != 0 && steps < o->par->chain) {
+          size_t from = (size_t)cur - 1u;
+          size_t dist;
+          uint32_t l;
+          steps++;
+          if (from >= p) {
+            break;
+          }
+          dist = p - from;
+          cur = o->prev[from];
+          if (dist > o->window) {
+            break;
+          }
+          if (best != 0 && p + best < total &&
+              o->base[from + best] != o->base[p + best]) {
+            continue;
+          }
+          l = (uint32_t)match_len(o->base, total, from, p);
+          if (l < BROTLI_MIN_MATCH || l <= best) {
+            continue;
+          }
+          best = l;
+          if (opt_pool_add(o, l, (uint32_t)dist) != 0) {
+            return -1;
+          }
+          got++;
+          if (l >= o->par->nice || got >= BROTLI_OPT_CANDS) {
+            break;
+          }
+        }
+      }
+      note_pos(o->head, o->prev, o->base, total, p);
+    }
+    {
+      size_t kend = search ? o->pool_n : (size_t)o->off[rel + 1u];
+      size_t kk;
+      for (kk = o->off[rel]; kk < kend && nc < 4 + BROTLI_OPT_CANDS; kk++) {
+        cl[nc] = o->pool_len[kk];
+        cd[nc] = o->pool_dist[kk];
+        cp[nc] = opt_dist_price(o, cd[nc], f->rep);
+        nc++;
+      }
+    }
+    if (nc == 0 && search) {
+      misses++;
+    }
+    else {
+      misses = 0;
+    }
+    for (k = 0; k < nc; k++) {
+      if (cl[k] > longest) {
+        longest = cl[k];
+        longest_k = k;
+      }
+    }
+    opt_literal(o, rel);
+    if (longest >= o->par->nice) {
+      size_t end;
+      uint32_t l = longest;
+      if ((size_t)l > o->len - rel) {
+        l = (uint32_t)(o->len - rel);
+      }
+      opt_edge(o, rel, l, cd[longest_k], cp[longest_k]);
+      end = rel + l;
+      if (search) {
+        size_t j;
+        for (j = rel + 1u; j < end; j++) {
+          o->off[j] = (uint32_t)o->pool_n;
+        }
+        if (l > 64u) {
+          size_t tail = p + l - 4u;
+          for (j = p + 4u; j < tail; j += 4u) {
+            note_pos(o->head, o->prev, o->base, total, j);
+          }
+          for (j = tail; j < p + l; j++) {
+            note_pos(o->head, o->prev, o->base, total, j);
+          }
+        }
+        else {
+          for (j = p + 1u; j < p + l; j++) {
+            note_pos(o->head, o->prev, o->base, total, j);
+          }
+        }
+      }
+      rel = end;
+      continue;
+    }
+    for (k = 0; k < nc; k++) {
+      /* chain answers rise in length: each covers the lengths past the one
+       * before it, which a nearer distance already reaches */
+      uint32_t lo = k > nrep ? cl[k - 1] + 1u : BROTLI_MIN_MATCH;
+      uint32_t l;
+      for (l = lo; l <= cl[k] && rel + l <= o->len; l++) {
+        opt_edge(o, rel, l, cd[k], cp[k]);
+      }
+    }
+    if (search && misses > 64) {
+      size_t step = (size_t)(misses >> 6);
+      size_t j;
+      if (step > 16u) {
+        step = 16u;
+      }
+      if (step > o->len - rel) {
+        step = o->len - rel;
+      }
+      for (j = 1; j < step; j++) {
+        o->off[rel + j] = (uint32_t)o->pool_n;
+        opt_literal(o, rel + j);
+      }
+      rel += step;
+      continue;
+    }
+    rel++;
+  }
+  if (search) {
+    o->off[o->len] = (uint32_t)o->pool_n;
+  }
+  return 0;
+}
+
+/* The path to the end of the chunk as commands; 0 when it is whole. */
+static int opt_trace(const brotli_optc_t * o, brotli_cmd_t * cmds, int cap,
+    int * ncmd_out) {
+  size_t q = o->len;
+  uint32_t tail = o->nodes[q].run;
+  size_t at = 0;
+  int n = 0;
+  int a;
+  int b;
+  if (o->nodes[q].cost >= BROTLI_OPT_INF) {
+    return 1;
+  }
+  q -= tail;
+  while (q > 0) {
+    const brotli_opt_t * nd = &o->nodes[q];
+    if (nd->mlen == 0 || n >= cap || nd->mlen + nd->mins > q) {
+      return 1;
+    }
+    cmds[n].insert = nd->mins;
+    cmds[n].copy = nd->mlen;
+    cmds[n].dist = nd->mdist;
+    cmds[n].tail = 0;
+    n++;
+    q -= nd->mlen + nd->mins;
+  }
+  /* they were found last first */
+  for (a = 0, b = n - 1; a < b; a++, b--) {
+    brotli_cmd_t t = cmds[a];
+    cmds[a] = cmds[b];
+    cmds[b] = t;
+  }
+  if (tail != 0) {
+    if (n >= cap) {
+      return 1;
+    }
+    cmds[n].insert = tail;
+    cmds[n].copy = 0;
+    cmds[n].dist = 0;
+    cmds[n].tail = 1;
+    n++;
+  }
+  for (a = 0; a < n; a++) {
+    cmds[a].at = (uint32_t)at;
+    at += cmds[a].insert + cmds[a].copy;
+  }
+  *ncmd_out = n;
+  return 0;
+}
+
+/* How much a literal is made to cost, for each parse that is tried. A
+ * literal's price comes from the previous parse's own use of literals, and on
+ * data where it is low (records with a few random bytes) the parse keeps
+ * choosing literals because it chose them before; dearer ones break out of it.
+ * The coder's own count of bytes is the judge, in brotli_compress_chunk_h. */
+static const float k_opt_litscale[BROTLI_OPT_VARIANTS] = {1.0f, 1.3f};
+
+static int parse_opt(const gcomp_allocator_t * alloc, const uint8_t * base,
+    size_t hist, size_t len, uint32_t window, const brotli_params_t * par,
+    uint32_t * head, uint32_t * prev, brotli_cmd_t * cmds_out[],
+    int ncmd_out[]) {
+  brotli_optc_t * o = gcomp_calloc(alloc, 1, sizeof(*o));
+  brotli_cmd_t * cmds = NULL;
+  int cap = (int)(len / BROTLI_MIN_MATCH) + 3;
+  int ncmd = 0;
+  int result = 1;
+  int variant;
+  int pass;
+  size_t k;
+  if (!o) {
+    return -1;
+  }
+  o->alloc = alloc;
+  o->base = base;
+  o->hist = hist;
+  o->len = len;
+  o->total = hist + len;
+  o->window = window;
+  o->par = par;
+  o->head = head;
+  o->prev = prev;
+  o->pool_cap = len < 4096u ? 4096u : len;
+  o->nodes = gcomp_malloc(alloc, (len + 1u) * sizeof(*o->nodes));
+  o->off = gcomp_malloc(alloc, (len + 2u) * sizeof(*o->off));
+  o->pool_len = gcomp_malloc(alloc, o->pool_cap * sizeof(*o->pool_len));
+  o->pool_dist = gcomp_malloc(alloc, o->pool_cap * sizeof(*o->pool_dist));
+  cmds = gcomp_malloc(alloc, (size_t)cap * sizeof(*cmds));
+  if (!o->nodes || !o->off || !o->pool_len || !o->pool_dist || !cmds) {
+    result = -1;
+    goto out;
+  }
+  fill_ic(o->imp, o->exp);
+  for (k = 0; k < BROTLI_OPT_TAB; k++) {
+    int c = 0;
+    int nb = 0;
+    uint32_t e = 0;
+    (void)length_code((uint32_t)k, k_ins_base, k_ins_extra, &c, &e, &nb);
+    o->ins_tab[k] = (uint8_t)c;
+    c = 0;
+    if (k < 2) {
+      o->copy_tab[k] = 0;
+      continue;
+    }
+    (void)length_code((uint32_t)k, k_copy_base, k_copy_extra, &c, &e, &nb);
+    o->copy_tab[k] = (uint8_t)c;
+  }
+  /* The last three positions of the previous chunk could not be hashed then,
+   * for want of the bytes after them. */
+  for (k = hist >= 3u ? hist - 3u : 0; k < hist; k++) {
+    note_pos(head, prev, base, o->total, k);
+  }
+  for (variant = 0; variant < BROTLI_OPT_VARIANTS; variant++) {
+    o->litscale = k_opt_litscale[variant];
+    opt_prior(o);
+    for (pass = 0; pass < BROTLI_OPT_PASSES; pass++) {
+      if (pass > 0) {
+        opt_prices(o, cmds, ncmd, par->rb);
+      }
+      if (opt_pass(o, variant == 0 && pass == 0, par->rb) != 0) {
+        result = -1;
+        goto out;
+      }
+      if (opt_trace(o, cmds, cap, &ncmd) != 0) {
+        goto out;
+      }
+    }
+    if (!verify_cmds(base, hist, len, window, cmds, ncmd)) {
+      goto out;
+    }
+    cmds_out[variant] = cmds;
+    ncmd_out[variant] = ncmd;
+    cmds = gcomp_malloc(alloc, (size_t)cap * sizeof(*cmds));
+    if (!cmds) {
+      result = -1;
+      goto out;
+    }
+  }
+  result = 0;
+out:
+  gcomp_free(alloc, cmds);
+  if (result != 0) {
+    for (variant = 0; variant < BROTLI_OPT_VARIANTS; variant++) {
+      gcomp_free(alloc, cmds_out[variant]);
+      cmds_out[variant] = NULL;
+    }
+  }
+  if (o) {
+    gcomp_free(alloc, o->nodes);
+    gcomp_free(alloc, o->off);
+    gcomp_free(alloc, o->pool_len);
+    gcomp_free(alloc, o->pool_dist);
+  }
+  gcomp_free(alloc, o);
+  return result;
 }
 
 /* fresh is how many distances must still be spelled absolutely. A full flush
@@ -2534,22 +3139,55 @@ out:
   return result;
 }
 
+/* One way of coding a chunk's commands: 0 with the bytes it takes and where it
+ * leaves the decoder's distances, 1 when it is no smaller than storing, -1 on
+ * allocation failure. */
+static int try_emit(const gcomp_allocator_t * alloc, uint8_t * buf, size_t cap,
+    const brotli_cmd_t * cmds, int ncmd, const uint8_t * base, size_t hist,
+    size_t len, int level, const uint32_t dist_rb[4], int rb_fresh,
+    size_t stored, size_t * n, uint32_t rb_out[4], int * fresh_out) {
+  brotli_bw_t bw;
+  int er;
+  memset(&bw, 0, sizeof(bw));
+  bw.buf = buf;
+  bw.cap = cap < stored ? cap : stored;
+  memcpy(rb_out, dist_rb, 4u * sizeof(uint32_t));
+  *fresh_out = rb_fresh;
+  if (write_mlen(&bw, len) != 0) {
+    return 1;
+  }
+  er = emit_block(alloc, &bw, base, hist, cmds, ncmd, len, level, rb_out,
+      fresh_out);
+  if (er != 0) {
+    return er == -2 ? -1 : 1;
+  }
+  if (write_meta_align(&bw) != 0 || bw.nbits != 0 || bw.len >= stored) {
+    return 1;
+  }
+  *n = bw.len;
+  return 0;
+}
+
 int brotli_compress_chunk_h(const gcomp_allocator_t * alloc, uint8_t * dst,
     size_t dst_cap, size_t * out_n, const uint8_t * base, size_t hist,
     size_t len, uint32_t window, int level, uint32_t dist_rb[4],
     int * rb_fresh, uint32_t * head, uint32_t * prev) {
   brotli_params_t par;
-  brotli_cmd_t * cmds = NULL;
-  brotli_bw_t bw;
-  uint32_t rb[4];
-  int fresh;
+  brotli_cmd_t * cmds[BROTLI_OPT_VARIANTS + 1] = {NULL};
+  int ncmd[BROTLI_OPT_VARIANTS + 1] = {0};
   size_t stored;
-  int ncmd = 0;
+  size_t best_n = 0;
+  uint32_t best_rb[4];
+  int best_fresh = 0;
+  int have = 0;
+  int result = 1;
   int pr;
-  int er;
+  int i;
+  uint8_t * scratch = NULL;
   const uint8_t * data = base ? base + hist : NULL;
   /* Level 1 takes the first match worth having; 2 defers one that the next
-   * position beats; 3 and 4 look through more of the chain. */
+   * position beats; 3 and 4 look through more of the chain; 5 finds the
+   * cheapest way through the chunk. */
   switch (level) {
   case 1:
     par.chain = 16;
@@ -2581,33 +3219,79 @@ int brotli_compress_chunk_h(const gcomp_allocator_t * alloc, uint8_t * dst,
   if (dst_cap < 8) {
     return 1;
   }
-  pr = parse_cmds(
-      alloc, base, hist, len, window, &par, head, prev, &cmds, &ncmd);
-  if (pr != 0) {
-    return pr;
+  if (level >= 5) {
+    /* The lazy parse of level 4 is a second candidate, and the smaller of the
+     * two codings is kept: the prices the cheapest parse works from are
+     * estimates, and on some data (records with random fields) they lead it
+     * somewhere the lazy parse does not go. Both fill the match finder, so it
+     * is put back between them. */
+    uint32_t * saved = gcomp_malloc(alloc, BROTLI_HASH_SIZE * sizeof(*saved));
+    if (!saved) {
+      return -1;
+    }
+    memcpy(saved, head, BROTLI_HASH_SIZE * sizeof(*saved));
+    pr = parse_cmds(
+        alloc, base, hist, len, window, &par, head, prev,
+        &cmds[BROTLI_OPT_VARIANTS], &ncmd[BROTLI_OPT_VARIANTS]);
+    memcpy(head, saved, BROTLI_HASH_SIZE * sizeof(*saved));
+    gcomp_free(alloc, saved);
+    if (pr < 0) {
+      return pr;
+    }
+    pr = parse_opt(alloc, base, hist, len, window, &par, head, prev, cmds, ncmd);
+    if (pr < 0) {
+      gcomp_free(alloc, cmds[BROTLI_OPT_VARIANTS]);
+      return pr;
+    }
+    scratch = gcomp_malloc(alloc, dst_cap);
+    if (!scratch) {
+      result = -1;
+      goto out;
+    }
   }
-  memset(&bw, 0, sizeof(bw));
-  bw.buf = dst;
-  bw.cap = dst_cap < stored ? dst_cap : stored;
-  memcpy(rb, dist_rb, sizeof(rb));
-  fresh = *rb_fresh;
-  if (write_mlen(&bw, len) != 0) {
-    gcomp_free(alloc, cmds);
-    return 1;
+  else {
+    pr = parse_cmds(
+        alloc, base, hist, len, window, &par, head, prev, &cmds[0], &ncmd[0]);
+    if (pr != 0) {
+      return pr;
+    }
   }
-  er = emit_block(alloc, &bw, base, hist, cmds, ncmd, len, level, rb, &fresh);
-  if (er != 0) {
-    gcomp_free(alloc, cmds);
-    return er == -2 ? -1 : 1;
+  for (i = 0; i <= BROTLI_OPT_VARIANTS; i++) {
+    size_t n = 0;
+    uint32_t rb[4];
+    int fresh = 0;
+    int r;
+    if (!cmds[i]) {
+      continue;
+    }
+    r = try_emit(alloc, i == 0 ? dst : scratch, dst_cap, cmds[i], ncmd[i], base,
+        hist, len, level, dist_rb, *rb_fresh, stored, &n, rb, &fresh);
+    if (r < 0) {
+      result = -1;
+      goto out;
+    }
+    if (r == 0 && (!have || n < best_n)) {
+      if (i != 0) {
+        memcpy(dst, scratch, n);
+      }
+      have = 1;
+      best_n = n;
+      memcpy(best_rb, rb, sizeof(best_rb));
+      best_fresh = fresh;
+    }
   }
-  gcomp_free(alloc, cmds);
-  if (write_meta_align(&bw) != 0 || bw.nbits != 0 || bw.len >= stored) {
-    return 1;
+  if (have) {
+    memcpy(dist_rb, best_rb, sizeof(best_rb));
+    *rb_fresh = best_fresh;
+    *out_n = best_n;
+    result = 0;
   }
-  memcpy(dist_rb, rb, sizeof(rb));
-  *rb_fresh = fresh;
-  *out_n = bw.len;
-  return 0;
+out:
+  gcomp_free(alloc, scratch);
+  for (i = 0; i <= BROTLI_OPT_VARIANTS; i++) {
+    gcomp_free(alloc, cmds[i]);
+  }
+  return result;
 }
 
 int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,

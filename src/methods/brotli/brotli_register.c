@@ -68,10 +68,10 @@ static const gcomp_option_schema_t g_brotli_option_schemas[] = {
         1,
         1,
         0,
-        4,
+        5,
         0,
         0,
-        "0 stores uncompressed meta-blocks. 1 to 4 use LZ77 and Huffman when that is smaller, searching harder and slower at each step.",
+        "0 stores uncompressed meta-blocks. 1 to 4 use LZ77 and Huffman when that is smaller, searching harder and slower at each step; 5 chooses the cheapest parse of each chunk.",
         NULL,
     },
     {

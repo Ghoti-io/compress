@@ -26,7 +26,7 @@ libc.
 | `"zlib"` | RFC 1950. |
 | `"gzip"` | RFC 1952. |
 | `"lz4"` | `threads.count` encodes blocks in parallel. That output is byte-identical to the single-threaded stream. |
-| `"brotli"` | RFC 7932. Level 1 (the default) to 4 write LZ77 and Huffman, matching across the whole window, harder at each step; level 0 stores uncompressed meta-blocks. The decoder reads the format. |
+| `"brotli"` | RFC 7932. Level 1 (the default) to 5 write LZ77 and Huffman, matching across the whole window, harder at each step; level 0 stores uncompressed meta-blocks. The decoder reads the format. |
 | `"bzip2"` | Streams of Burrows-Wheeler blocks, as `bzip2` and libbz2 write them. The encoder sorts with SA-IS and is within a few bytes of libbz2's size and as fast; a flush ends the stream. |
 | `"xz"` | The xz container: streams of blocks, each a chain of filters ending in LZMA2, with a CRC-32, CRC-64 or SHA-256 check and an index. Read and written as `xz` and liblzma do, including several blocks, several streams and the filters above. |
 | `"delta"`, `"bcj"` | Filters, not compressors: a byte-wise difference, and the branch converters for x86, PowerPC, IA-64, ARM, ARM Thumb, SPARC, ARM64 and RISC-V. Same size in and out, no header, exact in both directions, and xz's own, so an xz stream carries them. |

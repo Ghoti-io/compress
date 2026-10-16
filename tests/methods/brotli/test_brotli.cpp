@@ -1100,7 +1100,7 @@ TEST(Brotli, AMatchReachesBackAcrossChunksWhenTheWindowAllows) {
   data.insert(data.end(), filler.begin(), filler.end());
   data.insert(data.end(), block.begin(), block.end());
 
-  for (int level : {1, 2, 3, 4}) {
+  for (int level : {1, 2, 3, 4, 5}) {
     // 2^22 holds the 400000-byte distance; 2^16 cannot, so it is the control:
     // without it a smaller output could come from anything.
     std::vector<uint8_t> wide = encode_bytes(data.data(), data.size(), 22, level);
@@ -1147,7 +1147,7 @@ TEST(Brotli, TheHistorySlidesWithoutLosingTheMatchFinder) {
 }
 
 /**
- * Levels 1 to 4 all write streams that libbrotli reads, on every kind of input
+ * Levels 1 to 5 all write streams that libbrotli reads, on every kind of input
  * the other tests use, and a higher level is never much larger than a lower
  * one on text.
  */
@@ -1169,7 +1169,7 @@ TEST(Brotli, EveryLevelRoundTripsAndLibbrotliReadsIt) {
 
   for (const std::vector<uint8_t> * input : inputs) {
     size_t previous = 0;
-    for (int level : {1, 2, 3, 4}) {
+    for (int level : {1, 2, 3, 4, 5}) {
       std::vector<uint8_t> enc =
           encode_bytes(input->data(), input->size(), 22, level);
       ASSERT_FALSE(enc.empty());
@@ -1221,7 +1221,7 @@ TEST(Brotli, AFullFlushIsFollowedByTheSameBytesWhateverCameBefore) {
     }
     post.push_back(' ');
   }
-  for (int level : {2, 3, 4}) {
+  for (int level : {2, 3, 4, 5}) {
     std::vector<std::vector<uint8_t>> tails;
     std::vector<std::vector<uint8_t>> sync_tails;
     for (int variant = 0; variant < 3; variant++) {
@@ -1291,7 +1291,7 @@ TEST(Brotli, ContextModelsAndBlockTypesAreReadByLibbrotli) {
     }
   }
   const size_t level1 = encode_bytes(data.data(), data.size(), 22, 1).size();
-  for (int level : {2, 3, 4}) {
+  for (int level : {2, 3, 4, 5}) {
     std::vector<uint8_t> enc = encode_bytes(data.data(), data.size(), 22, level);
     EXPECT_LT(enc.size(), level1) << "level " << level;
     EXPECT_EQ(decode_bytes(enc.data(), enc.size(), data.size() + 8), data)
@@ -1305,6 +1305,55 @@ TEST(Brotli, ContextModelsAndBlockTypesAreReadByLibbrotli) {
       ASSERT_EQ(written, data.size());
       EXPECT_EQ(memcmp(out.data(), data.data(), data.size()), 0);
     }
+  }
+}
+
+/**
+ * Level 5 chooses the cheapest parse of each chunk by a price for every
+ * symbol, where level 4 takes the best match at each position and defers it
+ * for one step. On text whose words repeat at many distances, and on data
+ * with records at a fixed stride, the cheaper choice is a shorter match or a
+ * nearer copy than the longest, and the output is smaller by more than noise;
+ * if level 5 fell back to the lazy parse it would not be.
+ */
+TEST(Brotli, TheCheapestParseBeatsTheLazyOne) {
+  std::vector<uint8_t> text;
+  uint32_t lcg = 5;
+  auto next = [&lcg]() {
+    lcg = lcg * 1664525u + 1013904223u;
+    return lcg >> 8;
+  };
+  std::vector<std::string> words;
+  for (int i = 0; i < 600; i++) {
+    std::string w;
+    int n = 3 + (int)(next() % 7);
+    for (int k = 0; k < n; k++) {
+      w.push_back((char)('a' + next() % 8));
+    }
+    words.push_back(w);
+  }
+  while (text.size() < 300000) {
+    const std::string & w = words[next() % words.size()];
+    text.insert(text.end(), w.begin(), w.end());
+    text.push_back(' ');
+  }
+  std::vector<uint8_t> records;
+  for (int i = 0; i < 20000; i++) {
+    uint32_t rec[4] = {0x00415310u + 8 * (uint32_t)i, next() % 5, 0u,
+        next() % 3 ? 0x48u : 0x89u};
+    const uint8_t * b = reinterpret_cast<const uint8_t *>(rec);
+    records.insert(records.end(), b, b + sizeof(rec));
+  }
+  const std::vector<uint8_t> * inputs[] = {&text, &records};
+  for (const std::vector<uint8_t> * input : inputs) {
+    const std::vector<uint8_t> lazy =
+        encode_bytes(input->data(), input->size(), 22, 4);
+    const std::vector<uint8_t> cheapest =
+        encode_bytes(input->data(), input->size(), 22, 5);
+    EXPECT_EQ(decode_bytes(cheapest.data(), cheapest.size(), input->size() + 8),
+        *input);
+    EXPECT_LT(cheapest.size(), lazy.size() - lazy.size() / 50)
+        << "level 5 " << cheapest.size() << " level 4 " << lazy.size();
   }
 }
 

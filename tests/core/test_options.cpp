@@ -528,10 +528,10 @@ void setBrotliLevelBelowMin(gcomp_options_t * o) {
   gcomp_options_set_int64(o, "brotli.level", -1);
 }
 void setBrotliLevelAtMax(gcomp_options_t * o) {
-  gcomp_options_set_int64(o, "brotli.level", 4);
+  gcomp_options_set_int64(o, "brotli.level", 5);
 }
 void setBrotliLevelAboveMax(gcomp_options_t * o) {
-  gcomp_options_set_int64(o, "brotli.level", 5);
+  gcomp_options_set_int64(o, "brotli.level", 6);
 }
 // lzma and lzma2 at each boundary of each range, for the same reason as
 // brotli's: the encoder does not repeat them, so only the schema holds them.

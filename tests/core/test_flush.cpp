@@ -360,7 +360,7 @@ TEST_F(FlushTest, AFlushBeforeTheFirstUpdateLeavesRoomForALargeOne) {
             key = "zstd.level", lo = 1, hi = 19;
           }
           else if (!strcmp(method, "brotli")) {
-            key = "brotli.level", lo = 0, hi = 4;
+            key = "brotli.level", lo = 0, hi = 5;
           }
           else if (!strcmp(method, "lzma2")) {
             key = "lzma2.preset", lo = 0, hi = 6;
