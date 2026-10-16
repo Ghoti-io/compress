@@ -833,6 +833,34 @@ void add_scenarios(std::vector<Scenario> & out) {
       mixed, Mode::StreamingTiny, false});
   // Levels 2 to 4 defer matches and search deeper, and a window that holds the
   // whole of a block longer than a chunk lets one chunk match into the last.
+  // Literals that change character (prose, records, bytes of code) so that the
+  // context model and the block splitter both have something to choose.
+  std::vector<uint8_t> brotli_ctx;
+  {
+    uint32_t lcg = 5;
+    auto next = [&lcg]() {
+      lcg = lcg * 1664525u + 1013904223u;
+      return lcg >> 8;
+    };
+    const char * words[] = {"the", "stream", "decoder", "window", "of", "a",
+        "block", "and", "distance", "literal", "command", "context"};
+    for (int round = 0; round < 4; round++) {
+      for (int i = 0; i < 6000; i++) {
+        const char * w = words[next() % 12];
+        brotli_ctx.insert(brotli_ctx.end(), w, w + strlen(w));
+        brotli_ctx.push_back(' ');
+      }
+      for (int i = 0; i < 30000; i++) {
+        uint32_t r = next();
+        brotli_ctx.push_back(
+            (uint8_t)((r % 7 == 0) ? 0x0f : (r % 5 == 0 ? 0xc3 : r)));
+      }
+    }
+  }
+  out.push_back({"brotli/L2/context", "brotli", brotli_level_window(2, 22),
+      brotli_ctx, Mode::StreamingTiny, false});
+  out.push_back({"brotli/L4/context", "brotli", brotli_level_window(4, 22),
+      brotli_ctx, Mode::StreamingTiny, false});
   out.push_back({"brotli/L2/mixed-long", "brotli",
       brotli_level_window(2, 22), brotli_long, Mode::StreamingTiny, false});
   out.push_back({"brotli/L4/mixed-long", "brotli",

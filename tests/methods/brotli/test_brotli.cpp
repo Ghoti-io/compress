@@ -319,9 +319,10 @@ std::vector<uint8_t> PeriodicNoise(size_t period, unsigned seed) {
 /// Encode `pre`, flush with `mode`, encode `post`, finish. Returns the whole
 /// stream and reports how many bytes were emitted after the flush point.
 std::vector<uint8_t> EncodeAcrossFlush(const std::vector<uint8_t> & pre,
-    const std::vector<uint8_t> & post, gcomp_flush_t mode, size_t * after) {
+    const std::vector<uint8_t> & post, gcomp_flush_t mode, size_t * after,
+    int level = 1, int lgwin = 16) {
   gcomp_encoder_t * enc = nullptr;
-  gcomp_options_t * opts = lgwin_options(16, 1);
+  gcomp_options_t * opts = lgwin_options(lgwin, level);
   EXPECT_EQ(
       gcomp_encoder_create(gcomp_registry_default(), "brotli", opts, &enc),
       GCOMP_OK);
@@ -1187,6 +1188,122 @@ TEST(Brotli, EveryLevelRoundTripsAndLibbrotliReadsIt) {
         EXPECT_LT(enc.size(), previous + previous / 50) << "level " << level;
       }
       previous = enc.size();
+    }
+  }
+}
+
+/**
+ * After a full flush the bytes written must not depend on the bytes before it.
+ *
+ * Levels 2 and up code a literal under the context of the two bytes before it,
+ * and those two bytes at the start of the first meta-block after the flush are
+ * the last two of the data before it, which a decoder that had lost everything
+ * before the flush does not have. The encoder therefore codes that meta-block
+ * without a context model (and without matching into the history, which a full
+ * flush drops). The instrument: the same prose after the flush, preceded by
+ * data that ends in different bytes, whose coded form after the flush point
+ * must be the same bytes, not merely as many. Under a sync flush it must not
+ * be, which is the control: the prose is one for which a context model pays.
+ */
+TEST(Brotli, AFullFlushIsFollowedByTheSameBytesWhateverCameBefore) {
+  // One rare byte, then runs of digits and of letters that never mix: after
+  // a digit comes a digit, so the context of the first byte (the last of the
+  // data before the flush) decides which tree that rare byte is counted in.
+  std::vector<uint8_t> post = {'Q'};
+  uint32_t lcg = 31;
+  while (post.size() < 30000) {
+    lcg = lcg * 1664525u + 1013904223u;
+    const bool digits = (lcg >> 11) & 1;
+    for (int i = 0; i < 40; i++) {
+      lcg = lcg * 1664525u + 1013904223u;
+      post.push_back(digits ? (uint8_t)('0' + ((lcg >> 16) % 10))
+                            : (uint8_t)('a' + ((lcg >> 16) % 26)));
+    }
+    post.push_back(' ');
+  }
+  for (int level : {2, 3, 4}) {
+    std::vector<std::vector<uint8_t>> tails;
+    std::vector<std::vector<uint8_t>> sync_tails;
+    for (int variant = 0; variant < 3; variant++) {
+      std::vector<uint8_t> pre = PeriodicNoise(500 + variant, 90 + variant);
+      pre.push_back((uint8_t)(variant % 2 ? '3' + variant : 'a' + variant));
+      pre.push_back((uint8_t)(variant % 2 ? '0' + variant : 'k' + variant));
+      for (gcomp_flush_t mode : {GCOMP_FLUSH_SYNC, GCOMP_FLUSH_FULL}) {
+        size_t after = 0;
+        std::vector<uint8_t> stream =
+            EncodeAcrossFlush(pre, post, mode, &after, level, 22);
+        std::vector<uint8_t> whole = pre;
+        whole.insert(whole.end(), post.begin(), post.end());
+        ASSERT_EQ(decode_bytes(stream.data(), stream.size(), whole.size() + 8),
+            whole)
+            << "level " << level;
+        // The tail is everything after the flush, less the terminator.
+        std::vector<uint8_t> tail(stream.end() - (long)after, stream.end());
+        (mode == GCOMP_FLUSH_FULL ? tails : sync_tails).push_back(tail);
+      }
+    }
+    for (size_t i = 1; i < tails.size(); i++) {
+      EXPECT_EQ(tails[i], tails[0]) << "level " << level << " variant " << i;
+    }
+    bool sync_varies = false;
+    for (size_t i = 1; i < sync_tails.size(); i++) {
+      sync_varies = sync_varies || sync_tails[i] != sync_tails[0];
+    }
+    EXPECT_TRUE(sync_varies)
+        << "level " << level
+        << ": a sync flush gave the same bytes whatever came before, so this "
+           "input cannot show a full flush apart from it";
+  }
+}
+
+/**
+ * Context modelling and block splitting write streams libbrotli reads.
+ *
+ * The literals here change character every forty kilobytes (prose, a record
+ * table, bytes of machine-code shape), which is what the model is for; every
+ * level from 2 is read by libbrotli, by us, and byte-at-a-time, and a higher
+ * level is smaller than level 1 by more than noise.
+ */
+TEST(Brotli, ContextModelsAndBlockTypesAreReadByLibbrotli) {
+  std::vector<uint8_t> data;
+  uint32_t lcg = 77;
+  auto next = [&lcg]() {
+    lcg = lcg * 1664525u + 1013904223u;
+    return lcg >> 8;
+  };
+  const char * words[] = {"the", "stream", "decoder", "window", "of", "a",
+      "block", "and", "distance", "literal", "command", "context"};
+  for (int round = 0; round < 6; round++) {
+    while (data.size() < (size_t)(round * 3 + 1) * 40000) {
+      const char * w = words[next() % 12];
+      data.insert(data.end(), w, w + strlen(w));
+      data.push_back(' ');
+    }
+    for (int i = 0; i < 2500; i++) {
+      uint32_t rec[4] = {0x00415310u + 8 * (uint32_t)i, next() % 5, 0u,
+          next() % 3 ? 0x48u : 0x89u};
+      const uint8_t * b = reinterpret_cast<const uint8_t *>(rec);
+      data.insert(data.end(), b, b + sizeof(rec));
+    }
+    for (int i = 0; i < 40000; i++) {
+      uint32_t r = next();
+      data.push_back((uint8_t)((r % 7 == 0) ? 0x0f : (r % 5 == 0 ? 0xc3 : r)));
+    }
+  }
+  const size_t level1 = encode_bytes(data.data(), data.size(), 22, 1).size();
+  for (int level : {2, 3, 4}) {
+    std::vector<uint8_t> enc = encode_bytes(data.data(), data.size(), 22, level);
+    EXPECT_LT(enc.size(), level1) << "level " << level;
+    EXPECT_EQ(decode_bytes(enc.data(), enc.size(), data.size() + 8), data)
+        << "level " << level;
+    const BrotliLib & lib = brotli_lib();
+    if (lib.ok()) {
+      std::vector<uint8_t> out(data.size() + 8);
+      size_t written = out.size();
+      ASSERT_EQ(lib.decompress(enc.size(), enc.data(), &written, out.data()), 1)
+          << "level " << level;
+      ASSERT_EQ(written, data.size());
+      EXPECT_EQ(memcmp(out.data(), data.data(), data.size()), 0);
     }
   }
 }
