@@ -154,6 +154,36 @@ int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
     size_t dst_cap, size_t * out_n, const uint8_t * data, size_t len,
     uint32_t window, uint32_t dist_rb[4], int * rb_fresh);
 
+/** Bits of the match finder's hash; its head table has 1 << this entries. */
+#define BROTLI_MF_BITS 17
+
+/** The match finder's hash of the four bytes at p, in [0, 1 << BROTLI_MF_BITS). */
+uint32_t brotli_mf_hash(const uint8_t * p);
+
+/**
+ * Move the match finder's positions down by shift, when the first shift bytes
+ * of the buffer are dropped: keep entries of prev (those of the bytes that
+ * remain) are moved to the front and reduced, positions that fell off the
+ * front become empty, and head is reduced the same way.
+ */
+void brotli_mf_slide(
+    uint32_t * head, uint32_t * prev, size_t keep, size_t shift);
+
+/**
+ * The same, for a chunk that may match into what came before it.
+ *
+ * base[0 .. hist + len) is contiguous: hist bytes of history, then the chunk.
+ * A copy may start anywhere in it that the window allows. head (1 <<
+ * BROTLI_MF_BITS entries) and prev (hist + len entries) are the match finder's
+ * and persist from one call to the next; positions in them are indexes into
+ * base, plus one. They are left holding this chunk's positions. The caller
+ * owns sliding the history, and rebases them when it does (brotli_mf_rebase).
+ */
+int brotli_compress_chunk_h(const gcomp_allocator_t * alloc, uint8_t * dst,
+    size_t dst_cap, size_t * out_n, const uint8_t * base, size_t hist,
+    size_t len, uint32_t window, int level, uint32_t dist_rb[4],
+    int * rb_fresh, uint32_t * head, uint32_t * prev);
+
 gcomp_status_t brotli_encoder_init(gcomp_registry_t * registry,
     gcomp_options_t * options, gcomp_encoder_t * encoder);
 void brotli_encoder_destroy(gcomp_encoder_t * encoder);

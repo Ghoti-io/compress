@@ -573,8 +573,8 @@ compress/
 │       ├── brotli/
 │       │   ├── brotli_decode.c   # RFC 7932 decoder
 │       │   ├── brotli_bw.h       # LSB-first bit writer, shared by both halves
-│       │   ├── brotli_encode.c   # Stream, level 0 store, level 1 dispatch
-│       │   ├── brotli_lz.c       # Level 1 LZ77 and Huffman meta-blocks
+│       │   ├── brotli_encode.c   # Stream, history, level 0 store, level 1-4 dispatch
+│       │   ├── brotli_lz.c       # Level 1-4 LZ77 and Huffman meta-blocks
 │       │   ├── brotli_prefix.c   # Prefix codes
 │       │   ├── brotli_dict.c     # Static dictionary transforms
 │       │   ├── brotli_tables.c   # Dictionary, transforms, context LUTs

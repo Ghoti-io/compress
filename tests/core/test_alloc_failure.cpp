@@ -831,6 +831,12 @@ void add_scenarios(std::vector<Scenario> & out) {
       mixed, Mode::StreamingTiny, false});
   out.push_back({"brotli/L1/lgwin24", "brotli", brotli_level_window(1, 24),
       mixed, Mode::StreamingTiny, false});
+  // Levels 2 to 4 defer matches and search deeper, and a window that holds the
+  // whole of a block longer than a chunk lets one chunk match into the last.
+  out.push_back({"brotli/L2/mixed-long", "brotli",
+      brotli_level_window(2, 22), brotli_long, Mode::StreamingTiny, false});
+  out.push_back({"brotli/L4/mixed-long", "brotli",
+      brotli_level_window(4, 22), brotli_long, Mode::StreamingTiny, false});
   out.push_back({"brotli/L1/buffer", "brotli", brotli_level(1), mixed,
       Mode::Buffer, false});
   out.push_back({"brotli/L0/buffer", "brotli", brotli_level(0), rnd,

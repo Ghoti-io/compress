@@ -51,6 +51,9 @@
 #define BROTLI_BLOCK (256u * 1024u)
 #define BROTLI_SLACK 256u
 
+/* The most history kept for matching, whatever the window: 4 MiB. */
+#define BROTLI_HISTORY (4u * 1024u * 1024u)
+
 typedef struct brotli_enc_s {
   const gcomp_allocator_t * alloc;
   int lgwin;
@@ -62,6 +65,15 @@ typedef struct brotli_enc_s {
   uint8_t * hold;
   size_t hold_len;
   size_t hold_cap;
+  /* The history: hold[0 .. hist_len) is what was compressed before, kept so a
+   * chunk can copy from it, and the pending bytes follow it at
+   * hold[hist_len ..]. At most hist_keep bytes of it are kept across a slide,
+   * the number a match may reach back. The match finder's tables index it. */
+  size_t hist_len;
+  size_t hist_keep;
+  size_t buf_cap;
+  uint32_t * mf_head;
+  uint32_t * mf_prev;
   uint8_t * queue;
   size_t q_cap;
   uint8_t * scratch;
@@ -175,21 +187,50 @@ static int write_chunk(brotli_enc_t * st) {
     return write_stored(st, st->hold, st->hold_len);
   }
   window = (1u << st->lgwin) - 16u;
-  r = brotli_compress_chunk(st->alloc, st->scratch, st->scratch_cap, &n,
-      st->hold, st->hold_len, window, st->dist_rb, &st->rb_fresh);
+  r = brotli_compress_chunk_h(st->alloc, st->scratch, st->scratch_cap, &n,
+      st->hold, st->hist_len, st->hold_len, window, st->level, st->dist_rb,
+      &st->rb_fresh, st->mf_head, st->mf_prev);
   if (r < 0) {
     return -2;
   }
   if (r > 0) {
-    return write_stored_span(st, st->hold, st->hold_len);
+    return write_stored_span(st, st->hold + st->hist_len, st->hold_len);
   }
   return q_add(st, st->scratch, n);
+}
+
+/* Forget the history: nothing after this may copy from before it. */
+static void drop_history(brotli_enc_t * st) {
+  st->hist_len = 0;
+  if (st->mf_head) {
+    memset(st->mf_head, 0, ((size_t)1 << BROTLI_MF_BITS) * sizeof(uint32_t));
+  }
+}
+
+/* The pending chunk has been written: it becomes history. When there is no
+ * room left for another chunk the oldest history is dropped, keeping the last
+ * hist_keep bytes, and the finder's positions are moved down with it. The
+ * buffer holds twice what is kept, so this copies about one byte per byte
+ * compressed. */
+static void commit_history(brotli_enc_t * st) {
+  st->hist_len += st->hold_len;
+  st->hold_len = 0;
+  if (!st->mf_head) {
+    st->hist_len = 0;
+    return;
+  }
+  if (st->hist_len + BROTLI_BLOCK > st->buf_cap) {
+    size_t shift = st->hist_len - st->hist_keep;
+    memmove(st->hold, st->hold + shift, st->hist_keep);
+    brotli_mf_slide(st->mf_head, st->mf_prev, st->hist_keep, shift);
+    st->hist_len = st->hist_keep;
+  }
 }
 
 static gcomp_status_t emit_hold(gcomp_encoder_t * encoder, brotli_enc_t * st) {
   int r = write_chunk(st);
   if (r == 0) {
-    st->hold_len = 0;
+    commit_history(st);
     return GCOMP_OK;
   }
   if (r == -2) {
@@ -248,22 +289,34 @@ gcomp_status_t brotli_encoder_init(gcomp_registry_t * registry,
   st->q_cap = st->hold_cap + BROTLI_SLACK;
   st->scratch_cap = st->level >= 1 ? st->q_cap : 0;
   reset_dist(st);
-  st->hold = gcomp_malloc(alloc, st->hold_cap);
+  if (st->level >= 1) {
+    /* A match may reach back as far as the window, but no further than
+     * BROTLI_HISTORY: past a few megabytes the tables cost more than the
+     * matches they find. */
+    size_t window = ((size_t)1 << st->lgwin) - 16u;
+    st->hist_keep = window < BROTLI_HISTORY ? window : BROTLI_HISTORY;
+    st->buf_cap = 2u * st->hist_keep + BROTLI_BLOCK;
+  }
+  else {
+    st->buf_cap = st->hold_cap;
+  }
+  st->hold = gcomp_malloc(alloc, st->buf_cap);
   st->queue = gcomp_malloc(alloc, st->q_cap);
-  if (!st->hold || !st->queue) {
+  if (st->level >= 1) {
+    st->mf_head = gcomp_calloc(
+        alloc, (size_t)1 << BROTLI_MF_BITS, sizeof(*st->mf_head));
+    st->mf_prev = gcomp_malloc(alloc, st->buf_cap * sizeof(*st->mf_prev));
+    st->scratch = gcomp_malloc(alloc, st->scratch_cap);
+  }
+  if (!st->hold || !st->queue ||
+      (st->level >= 1 && (!st->mf_head || !st->mf_prev || !st->scratch))) {
     gcomp_free(alloc, st->hold);
     gcomp_free(alloc, st->queue);
+    gcomp_free(alloc, st->mf_head);
+    gcomp_free(alloc, st->mf_prev);
+    gcomp_free(alloc, st->scratch);
     gcomp_free(alloc, st);
     return GCOMP_ERR_MEMORY;
-  }
-  if (st->scratch_cap != 0) {
-    st->scratch = gcomp_malloc(alloc, st->scratch_cap);
-    if (!st->scratch) {
-      gcomp_free(alloc, st->hold);
-      gcomp_free(alloc, st->queue);
-      gcomp_free(alloc, st);
-      return GCOMP_ERR_MEMORY;
-    }
   }
   encoder->method_state = st;
   return GCOMP_OK;
@@ -276,6 +329,8 @@ void brotli_encoder_destroy(gcomp_encoder_t * encoder) {
   }
   st = encoder->method_state;
   gcomp_free(st->alloc, st->scratch);
+  gcomp_free(st->alloc, st->mf_head);
+  gcomp_free(st->alloc, st->mf_prev);
   gcomp_free(st->alloc, st->hold);
   gcomp_free(st->alloc, st->queue);
   gcomp_free(st->alloc, st);
@@ -309,7 +364,7 @@ gcomp_status_t brotli_encoder_update(gcomp_encoder_t * encoder,
       size_t avail = input->size - input->used;
       size_t take = room < avail ? room : avail;
       if (take != 0) {
-        memcpy(st->hold + st->hold_len, src + input->used, take);
+        memcpy(st->hold + st->hist_len + st->hold_len, src + input->used, take);
         st->hold_len += take;
         input->used += take;
       }
@@ -434,6 +489,7 @@ gcomp_status_t brotli_encoder_flush(gcomp_encoder_t * encoder,
   }
   if (mode == GCOMP_FLUSH_FULL) {
     st->rb_fresh = 4;
+    drop_history(st);
   }
   drain(st, output);
   if (st->q_len != 0) {
@@ -455,6 +511,7 @@ gcomp_status_t brotli_encoder_reset(gcomp_encoder_t * encoder) {
   st->started = 0;
   st->finished = 0;
   st->hold_len = 0;
+  drop_history(st);
   st->q_len = 0;
   st->q_pos = 0;
   reset_dist(st);

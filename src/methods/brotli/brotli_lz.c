@@ -41,9 +41,8 @@
 
 #include <string.h>
 
-#define BROTLI_HASH_BITS 15
+#define BROTLI_HASH_BITS BROTLI_MF_BITS
 #define BROTLI_HASH_SIZE (1u << BROTLI_HASH_BITS)
-#define BROTLI_CHAIN 128
 #define BROTLI_MIN_MATCH 4
 
 /* Why no distance here can outrun the alphabet.
@@ -66,6 +65,13 @@
  * could not tell the difference, because nothing a caller can ask for comes
  * within three orders of magnitude of the bound. If matches are ever let
  * cross chunks, the window leg still holds. */
+
+/* What a level asks of the match finder. */
+typedef struct brotli_params_s {
+  int chain;    /* candidates examined per position */
+  size_t nice;  /* a match this long is taken without looking further */
+  int lazy;     /* defer a match when the next position starts a longer one */
+} brotli_params_t;
 
 typedef struct brotli_canon_s {
   uint16_t code;
@@ -837,6 +843,22 @@ static uint32_t hash4(const uint8_t * p) {
   return v >> (32 - BROTLI_HASH_BITS);
 }
 
+uint32_t brotli_mf_hash(const uint8_t * p) {
+  return hash4(p);
+}
+
+void brotli_mf_slide(uint32_t * head, uint32_t * prev, size_t keep, size_t shift) {
+  size_t i;
+  for (i = 0; i < keep; i++) {
+    uint32_t v = prev[i + shift];
+    prev[i] = v > shift ? v - (uint32_t)shift : 0;
+  }
+  for (i = 0; i < BROTLI_HASH_SIZE; i++) {
+    uint32_t v = head[i];
+    head[i] = v > shift ? v - (uint32_t)shift : 0;
+  }
+}
+
 static size_t match_len(const uint8_t * data, size_t n, size_t from, size_t pos) {
   size_t len = 0;
   size_t max;
@@ -852,7 +874,11 @@ static size_t match_len(const uint8_t * data, size_t n, size_t from, size_t pos)
     memcpy(&b, data + pos + len, sizeof(b));
     diff = a ^ b;
     if (diff != 0) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      len += (size_t)(__builtin_clzll(diff) / 8u);
+#else
       len += (size_t)(__builtin_ctzll(diff) / 8u);
+#endif
       return len;
     }
     len += 8u;
@@ -863,6 +889,8 @@ static size_t match_len(const uint8_t * data, size_t n, size_t from, size_t pos)
   return len;
 }
 
+/* Positions are indexes into the buffer that holds the history and then the
+ * chunk, stored as index + 1 so that 0 means empty. */
 static void note_pos(uint32_t * head, uint32_t * prev, const uint8_t * data,
     size_t n, size_t pos) {
   uint32_t h;
@@ -875,8 +903,8 @@ static void note_pos(uint32_t * head, uint32_t * prev, const uint8_t * data,
 }
 
 static void find_match(const uint32_t * head, const uint32_t * prev,
-    const uint8_t * data, size_t n, size_t pos, uint32_t window, size_t * mlen,
-    size_t * mdist) {
+    const uint8_t * data, size_t n, size_t pos, uint32_t window, int chain,
+    size_t nice, size_t * mlen, size_t * mdist) {
   uint32_t cur;
   int steps = 0;
   *mlen = 0;
@@ -885,7 +913,7 @@ static void find_match(const uint32_t * head, const uint32_t * prev,
     return;
   }
   cur = head[hash4(data + pos)];
-  while (cur != 0 && steps < BROTLI_CHAIN) {
+  while (cur != 0 && steps < chain) {
     size_t from = (size_t)cur - 1u;
     size_t dist;
     size_t len;
@@ -895,7 +923,12 @@ static void find_match(const uint32_t * head, const uint32_t * prev,
     }
     dist = pos - from;
     cur = prev[from];
-    if (dist == 0 || dist > window || dist > pos) {
+    if (dist > window) {
+      break;
+    }
+    /* A candidate that cannot beat the best so far differs from it at the
+     * byte one past that length. */
+    if (*mlen != 0 && pos + *mlen < n && data[from + *mlen] != data[pos + *mlen]) {
       continue;
     }
     len = match_len(data, n, from, pos);
@@ -903,38 +936,70 @@ static void find_match(const uint32_t * head, const uint32_t * prev,
         (len > *mlen || (len == *mlen && dist < *mdist))) {
       *mlen = len;
       *mdist = dist;
+      if (len >= nice) {
+        break;
+      }
     }
   }
 }
 
-static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
-    size_t len, uint32_t window, brotli_cmd_t ** cmds_out, int * ncmd_out) {
-  uint32_t * head;
-  uint32_t * prev;
+/* The commands for data[hist .. hist + len), which may copy from anywhere in
+ * data[0 .. hist + len) that the window allows. head and prev are the match
+ * finder's, and are left holding the positions of this chunk, so that the next
+ * chunk can match into it. The cmds' `at` fields are relative to the chunk. */
+static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * base,
+    size_t hist, size_t len, uint32_t window, const brotli_params_t * par,
+    uint32_t * head, uint32_t * prev, brotli_cmd_t ** cmds_out,
+    int * ncmd_out) {
   brotli_cmd_t * cmds;
+  const size_t total = hist + len;
   size_t cap;
-  size_t pos = 0;
+  size_t pos = hist;
   size_t lit = 0;
-  size_t lit_at = 0;
+  size_t lit_at = hist;
   int ncmd = 0;
   int misses = 0;
   int ok = 0;
-  head = gcomp_calloc(alloc, BROTLI_HASH_SIZE, sizeof(*head));
-  prev = gcomp_calloc(alloc, len, sizeof(*prev));
   cap = len / BROTLI_MIN_MATCH + 2u;
   cmds = gcomp_malloc(alloc, cap * sizeof(*cmds));
-  if (!head || !prev || !cmds) {
-    gcomp_free(alloc, head);
-    gcomp_free(alloc, prev);
-    gcomp_free(alloc, cmds);
+  if (!cmds) {
     return -1;
   }
-  while (pos < len) {
+  /* The last three positions of the previous chunk could not be hashed then,
+   * for want of the bytes after them. */
+  {
+    size_t k = hist >= 3u ? hist - 3u : 0;
+    for (; k < hist; k++) {
+      note_pos(head, prev, base, total, k);
+    }
+  }
+  while (pos < total) {
     size_t mlen = 0;
     size_t mdist = 0;
     size_t step;
-    find_match(head, prev, data, len, pos, window, &mlen, &mdist);
-    note_pos(head, prev, data, len, pos);
+    find_match(head, prev, base, total, pos, window, par->chain, par->nice,
+        &mlen, &mdist);
+    note_pos(head, prev, base, total, pos);
+    /* One step of lazy matching: if the next position starts a longer match,
+     * this one is passed over for it, and its first byte becomes a literal. */
+    while (par->lazy && mlen >= BROTLI_MIN_MATCH && mlen < par->nice &&
+           pos + 1u < total) {
+      size_t nlen = 0;
+      size_t ndist = 0;
+      find_match(head, prev, base, total, pos + 1u, window, par->chain,
+          par->nice, &nlen, &ndist);
+      if (nlen <= mlen + 1u) {
+        break;
+      }
+      if (lit == 0) {
+        lit_at = pos;
+      }
+      lit++;
+      pos++;
+      note_pos(head, prev, base, total, pos);
+      mlen = nlen;
+      mdist = ndist;
+    }
     if (mlen >= BROTLI_MIN_MATCH) {
       size_t end = pos + mlen;
       size_t k;
@@ -942,25 +1007,23 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
         goto done;
       }
       misses = 0;
-      /* A match that ends the chunk is never searched again, so the
-       * positions inside it do not belong in the chain. A long match
-       * that does not end the chunk is entered every fourth byte, plus
-       * its last four, which is what the next search can still reach. */
-      if (end < len && mlen > 64u) {
+      /* A long match is entered every fourth byte, plus its last four, which
+       * is what the next search can still reach. */
+      if (mlen > 64u) {
         size_t tail = end - 4u;
         for (k = pos + 4u; k < tail; k += 4u) {
-          note_pos(head, prev, data, len, k);
+          note_pos(head, prev, base, total, k);
         }
         for (k = tail; k < end; k++) {
-          note_pos(head, prev, data, len, k);
+          note_pos(head, prev, base, total, k);
         }
       }
-      else if (end < len) {
+      else {
         for (k = pos + 1u; k < end; k++) {
-          note_pos(head, prev, data, len, k);
+          note_pos(head, prev, base, total, k);
         }
       }
-      cmds[ncmd].at = (uint32_t)lit_at;
+      cmds[ncmd].at = (uint32_t)(lit_at - hist);
       cmds[ncmd].insert = (uint32_t)lit;
       cmds[ncmd].copy = (uint32_t)mlen;
       cmds[ncmd].dist = (uint32_t)mdist;
@@ -982,8 +1045,8 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
           step = 16u;
         }
       }
-      if (step > len - pos) {
-        step = len - pos;
+      if (step > total - pos) {
+        step = total - pos;
       }
       lit += step;
       pos += step;
@@ -993,7 +1056,7 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
     if ((size_t)ncmd >= cap) {
       goto done;
     }
-    cmds[ncmd].at = (uint32_t)lit_at;
+    cmds[ncmd].at = (uint32_t)(lit_at - hist);
     cmds[ncmd].insert = (uint32_t)lit;
     cmds[ncmd].copy = 0;
     cmds[ncmd].dist = 0;
@@ -1001,7 +1064,9 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
     ncmd++;
   }
   {
+    /* Every command is checked against the bytes before it is believed. */
     size_t p = 0;
+    const uint8_t * data = base + hist;
     int c;
     for (c = 0; c < ncmd; c++) {
       size_t i;
@@ -1015,7 +1080,8 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
       if (cmds[c].tail) {
         continue;
       }
-      if (cmds[c].dist == 0 || cmds[c].dist > p || cmds[c].dist > window) {
+      if (cmds[c].dist == 0 || cmds[c].dist > p + hist ||
+          cmds[c].dist > window) {
         goto done;
       }
       if (p + cmds[c].copy > len) {
@@ -1026,14 +1092,14 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
         uint64_t a;
         uint64_t b;
         memcpy(&a, data + p + i, sizeof(a));
-        memcpy(&b, data + (p - cmds[c].dist) + i, sizeof(b));
+        memcpy(&b, (data + p) - cmds[c].dist + i, sizeof(b));
         if (a != b) {
           goto done;
         }
         i += 8u;
       }
       while (i < cmds[c].copy) {
-        if (data[p + i] != data[(p - cmds[c].dist) + i]) {
+        if (data[p + i] != *((data + p) - cmds[c].dist + i)) {
           goto done;
         }
         i++;
@@ -1046,8 +1112,6 @@ static int parse_cmds(const gcomp_allocator_t * alloc, const uint8_t * data,
   }
   ok = 1;
 done:
-  gcomp_free(alloc, head);
-  gcomp_free(alloc, prev);
   if (!ok) {
     gcomp_free(alloc, cmds);
     return 1;
@@ -1336,9 +1400,11 @@ static int emit_block(const gcomp_allocator_t * alloc, brotli_bw_t * b,
   return 0;
 }
 
-int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
-    size_t dst_cap, size_t * out_n, const uint8_t * data, size_t len,
-    uint32_t window, uint32_t dist_rb[4], int * rb_fresh) {
+int brotli_compress_chunk_h(const gcomp_allocator_t * alloc, uint8_t * dst,
+    size_t dst_cap, size_t * out_n, const uint8_t * base, size_t hist,
+    size_t len, uint32_t window, int level, uint32_t dist_rb[4],
+    int * rb_fresh, uint32_t * head, uint32_t * prev) {
+  brotli_params_t par;
   brotli_cmd_t * cmds = NULL;
   brotli_bw_t bw;
   uint32_t rb[4];
@@ -1346,15 +1412,41 @@ int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
   size_t stored;
   int ncmd = 0;
   int pr;
+  const uint8_t * data = base ? base + hist : NULL;
+  /* Level 1 takes the first match worth having; 2 defers one that the next
+   * position beats; 3 and 4 look through more of the chain. */
+  switch (level) {
+  case 1:
+    par.chain = 16;
+    par.nice = 128;
+    par.lazy = 0;
+    break;
+  case 2:
+    par.chain = 16;
+    par.nice = 128;
+    par.lazy = 1;
+    break;
+  case 3:
+    par.chain = 48;
+    par.nice = 256;
+    par.lazy = 1;
+    break;
+  default:
+    par.chain = 128;
+    par.nice = 256;
+    par.lazy = 1;
+    break;
+  }
   if (!dst || !out_n || !data || !dist_rb || !rb_fresh || len == 0
-      || len > 16777216u) {
+      || len > 16777216u || !head || !prev) {
     return 1;
   }
   stored = len + 3u * ((len + 65535u) / 65536u);
   if (dst_cap < 8) {
     return 1;
   }
-  pr = parse_cmds(alloc, data, len, window, &cmds, &ncmd);
+  pr = parse_cmds(
+      alloc, base, hist, len, window, &par, head, prev, &cmds, &ncmd);
   if (pr != 0) {
     return pr;
   }
@@ -1383,4 +1475,27 @@ int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
   *rb_fresh = fresh;
   *out_n = bw.len;
   return 0;
+}
+
+int brotli_compress_chunk(const gcomp_allocator_t * alloc, uint8_t * dst,
+    size_t dst_cap, size_t * out_n, const uint8_t * data, size_t len,
+    uint32_t window, uint32_t dist_rb[4], int * rb_fresh) {
+  uint32_t * head;
+  uint32_t * prev;
+  int r;
+  if (!data || len == 0 || len > 16777216u) {
+    return 1;
+  }
+  head = gcomp_calloc(alloc, BROTLI_HASH_SIZE, sizeof(*head));
+  prev = gcomp_calloc(alloc, len, sizeof(*prev));
+  if (!head || !prev) {
+    gcomp_free(alloc, head);
+    gcomp_free(alloc, prev);
+    return -1;
+  }
+  r = brotli_compress_chunk_h(alloc, dst, dst_cap, out_n, data, 0, len, window,
+      1, dist_rb, rb_fresh, head, prev);
+  gcomp_free(alloc, head);
+  gcomp_free(alloc, prev);
+  return r;
 }

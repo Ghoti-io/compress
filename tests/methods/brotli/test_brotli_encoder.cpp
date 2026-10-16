@@ -708,6 +708,61 @@ TEST_F(BrotliEncoderTest, TheChunkWriterDeclinesWhatItCannotFrame) {
   EXPECT_EQ(rb[3], 16u);
 }
 
+/**
+ * Sliding the history keeps the match finder's tables true.
+ *
+ * What the encoder does when its buffer fills is drop the oldest bytes and
+ * move every position the finder holds. A position left unmoved still points
+ * somewhere in the buffer, so nothing crashes and every candidate it yields is
+ * verified before use; it just finds nothing, and the cost is a few bytes of
+ * output per slide that no size threshold can see. So this looks at the
+ * tables: after the slide every head entry and every link of every chain names
+ * a position whose four bytes hash to the chain it is in, and a chain only
+ * ever points backwards.
+ */
+TEST(BrotliEncoder, SlidingTheHistoryKeepsTheFindersChainsTrue) {
+  const size_t hist = 200000;
+  const size_t keep = 50000;
+  const size_t shift = hist - keep;
+  std::vector<uint8_t> buf(hist + 4096);
+  uint32_t lcg = 5;
+  for (size_t i = 0; i < buf.size(); i++) {
+    lcg = lcg * 1664525u + 1013904223u;
+    // A small alphabet so chains are long and many positions share a hash.
+    buf[i] = (uint8_t)('a' + ((lcg >> 20) % 3));
+  }
+  std::vector<uint32_t> head((size_t)1 << BROTLI_MF_BITS, 0);
+  std::vector<uint32_t> prev(buf.size(), 0);
+  std::vector<uint8_t> out(hist + 4096);
+  size_t written = 0;
+  uint32_t rb[4] = {4, 11, 15, 16};
+  int fresh = 0;
+  (void)brotli_compress_chunk_h(nullptr, out.data(), out.size(), &written,
+      buf.data(), 0, hist, 1u << 22, 4, rb, &fresh, head.data(), prev.data());
+
+  std::memmove(buf.data(), buf.data() + shift, keep);
+  brotli_mf_slide(head.data(), prev.data(), keep, shift);
+
+  size_t chains = 0;
+  size_t links = 0;
+  for (size_t h = 0; h < head.size(); h++) {
+    uint32_t v = head[h];
+    size_t last = SIZE_MAX;
+    while (v != 0) {
+      const size_t pos = (size_t)v - 1;
+      ASSERT_LT(pos, keep) << "head " << h;
+      ASSERT_LT(pos, last) << "a chain must run backwards";
+      ASSERT_EQ(brotli_mf_hash(buf.data() + pos), h) << "pos " << pos;
+      last = pos;
+      links++;
+      v = prev[pos];
+    }
+    chains += head[h] != 0;
+  }
+  EXPECT_GT(chains, 10u);
+  EXPECT_GT(links, 10000u);
+}
+
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

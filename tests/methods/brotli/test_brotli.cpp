@@ -1080,6 +1080,117 @@ TEST(Brotli, LibbrotliStreamsAreReadWhateverTheChunking) {
   }
 }
 
+/**
+ * A match may reach back across chunks.
+ *
+ * The encoder compresses up to 256 KiB at a time, and for a long time a match
+ * could not leave the chunk it was found in: a repeat 400 KB back was literal
+ * text however large the window, so machine code and anything else whose
+ * redundancy is far apart compressed at about half what libbrotli's quality 5
+ * does. These put a block, three hundred thousand bytes that cannot be
+ * matched, then the block again.
+ */
+TEST(Brotli, AMatchReachesBackAcrossChunksWhenTheWindowAllows) {
+  std::vector<uint8_t> block(100000);
+  test_helpers_generate_random(block.data(), block.size(), 7);
+  std::vector<uint8_t> filler(300000);
+  test_helpers_generate_random(filler.data(), filler.size(), 8);
+  std::vector<uint8_t> data = block;
+  data.insert(data.end(), filler.begin(), filler.end());
+  data.insert(data.end(), block.begin(), block.end());
+
+  for (int level : {1, 2, 3, 4}) {
+    // 2^22 holds the 400000-byte distance; 2^16 cannot, so it is the control:
+    // without it a smaller output could come from anything.
+    std::vector<uint8_t> wide = encode_bytes(data.data(), data.size(), 22, level);
+    std::vector<uint8_t> narrow =
+        encode_bytes(data.data(), data.size(), 16, level);
+    EXPECT_LT(wide.size(), 400000u + 2000u) << "level " << level;
+    EXPECT_GT(narrow.size(), 480000u) << "level " << level;
+    EXPECT_EQ(decode_bytes(wide.data(), wide.size(), data.size() + 8), data);
+    EXPECT_EQ(decode_bytes(narrow.data(), narrow.size(), data.size() + 8), data);
+    const BrotliLib & lib = brotli_lib();
+    if (lib.ok()) {
+      std::vector<uint8_t> out(data.size() + 8);
+      size_t written = out.size();
+      ASSERT_EQ(lib.decompress(wide.size(), wide.data(), &written, out.data()), 1)
+          << "level " << level;
+      ASSERT_EQ(written, data.size());
+      EXPECT_EQ(memcmp(out.data(), data.data(), data.size()), 0);
+    }
+  }
+}
+
+/**
+ * The history slides. With a window of 1008 bytes the encoder keeps 1008 bytes
+ * of history in a buffer of about 264 KB, so three megabytes of input slide it
+ * a dozen times, and each slide moves every position the match finder holds.
+ * A position left unmoved points at the wrong bytes, which the encoder's check
+ * of its own commands turns into a stored chunk rather than a wrong stream, so
+ * this looks at the size as well as the round trip: a period of 500 is found
+ * at every chunk if the finder is right and never if it is not.
+ */
+TEST(Brotli, TheHistorySlidesWithoutLosingTheMatchFinder) {
+  std::vector<uint8_t> period(500);
+  test_helpers_generate_random(period.data(), period.size(), 3);
+  std::vector<uint8_t> data;
+  while (data.size() < 3u * 1024u * 1024u) {
+    data.insert(data.end(), period.begin(), period.end());
+    data.push_back((uint8_t)(data.size() >> 9));
+  }
+  for (int level : {1, 4}) {
+    std::vector<uint8_t> enc = encode_bytes(data.data(), data.size(), 10, level);
+    EXPECT_LT(enc.size(), data.size() / 40) << "level " << level;
+    EXPECT_EQ(decode_bytes(enc.data(), enc.size(), data.size() + 8), data);
+  }
+}
+
+/**
+ * Levels 1 to 4 all write streams that libbrotli reads, on every kind of input
+ * the other tests use, and a higher level is never much larger than a lower
+ * one on text.
+ */
+TEST(Brotli, EveryLevelRoundTripsAndLibbrotliReadsIt) {
+  std::vector<uint8_t> text;
+  const char * words[] = {"the", "stream", "decoder", "window", "of", "a",
+      "block", "and", "distance", "literal", "command", "context"};
+  uint32_t lcg = 99;
+  for (int i = 0; i < 60000; i++) {
+    lcg = lcg * 1664525u + 1013904223u;
+    const char * w = words[(lcg >> 16) % 12];
+    text.insert(text.end(), w, w + strlen(w));
+    text.push_back(' ');
+  }
+  std::vector<uint8_t> noise(70000);
+  test_helpers_generate_random(noise.data(), noise.size(), 9);
+  std::vector<uint8_t> runs(200000, 'z');
+  const std::vector<uint8_t> * inputs[] = {&text, &noise, &runs};
+
+  for (const std::vector<uint8_t> * input : inputs) {
+    size_t previous = 0;
+    for (int level : {1, 2, 3, 4}) {
+      std::vector<uint8_t> enc =
+          encode_bytes(input->data(), input->size(), 22, level);
+      ASSERT_FALSE(enc.empty());
+      EXPECT_EQ(decode_bytes(enc.data(), enc.size(), input->size() + 8),
+          *input);
+      const BrotliLib & lib = brotli_lib();
+      if (lib.ok()) {
+        std::vector<uint8_t> out(input->size() + 8);
+        size_t written = out.size();
+        ASSERT_EQ(lib.decompress(enc.size(), enc.data(), &written, out.data()), 1)
+            << "level " << level;
+        ASSERT_EQ(written, input->size());
+        EXPECT_EQ(memcmp(out.data(), input->data(), input->size()), 0);
+      }
+      if (input == &text && previous != 0) {
+        EXPECT_LT(enc.size(), previous + previous / 50) << "level " << level;
+      }
+      previous = enc.size();
+    }
+  }
+}
+
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
